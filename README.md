@@ -1,5 +1,9 @@
 # awswap
 
+[![CI](https://img.shields.io/github/actions/workflow/status/drew-simmons/awswap/ci.yml?branch=main&label=CI)](https://github.com/drew-simmons/awswap/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/drew-simmons/awswap?label=release)](https://github.com/drew-simmons/awswap/releases/latest)
+[![License](https://img.shields.io/github/license/drew-simmons/awswap)](LICENSE)
+
 `awswap` is a fast AWS profile switcher with a searchable, metadata-rich picker.
 It validates credentials when you switch, opens AWS sign-in when SSO or login
 credentials have expired, authenticates Docker and Helm to ECR, and includes
