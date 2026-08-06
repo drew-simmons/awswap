@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/drew-simmons/awswap/compare/v0.1.0...v0.2.0) (2026-08-06)
+
+
+### Features
+
+* initial release ([06e9a1e](https://github.com/drew-simmons/awswap/commit/06e9a1e413d128d389f1104be7668469630684bc))
+
 ## 0.1.0 (2026-08-06)
 
 
