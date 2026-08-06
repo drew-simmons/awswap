@@ -10,3 +10,6 @@ updates:
     schedule:
       interval: weekly
     labels: [dependencies]
+    ignore:
+      # These tags select the Rust version, not the action version.
+      - dependency-name: dtolnay/rust-toolchain
