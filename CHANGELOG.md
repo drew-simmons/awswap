@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/drew-simmons/awswap/compare/v0.2.0...v0.3.0) (2026-08-06)
+
+
+### Features
+
+* initial release ([06e9a1e](https://github.com/drew-simmons/awswap/commit/06e9a1e413d128d389f1104be7668469630684bc))
+
+
+### Bug Fixes
+
+* release and dependabot workflows ([665c9b9](https://github.com/drew-simmons/awswap/commit/665c9b9f31b27becb2bf25bfbe5c1508e1bf91e3))
+
 ## [0.2.0](https://github.com/drew-simmons/awswap/compare/v0.1.0...v0.2.0) (2026-08-06)
 
 
