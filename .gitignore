@@ -1,0 +1,11 @@
+# Rust build outputs
+debug/
+target/
+
+# Generated backup and debug files
+**/*.rs.bk
+*.pdb
+
+# Local tooling state
+.kiro/
+.rumdl_cache/

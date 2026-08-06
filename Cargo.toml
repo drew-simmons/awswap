@@ -1,0 +1,26 @@
+[package]
+name = "awswap"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.88"
+description = "Fast AWS profile switching with credential validation and ECR authentication"
+license = "MIT"
+repository = "https://github.com/drew-simmons/awswap"
+homepage = "https://github.com/drew-simmons/awswap"
+readme = "README.md"
+keywords = ["aws", "profile", "sso", "ecr", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+
+[package.metadata.dist]
+dist = true
+
+[dependencies]
+inquire = "0.9.4"
+owo-colors = { version = "=4.3.0", features = ["supports-colors"] }
+serde_json = "=1.0.150"
+
+# The profile that dist uses for release artifacts.
+[profile.dist]
+inherits = "release"
+lto = "thin"
