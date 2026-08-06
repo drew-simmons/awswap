@@ -1,0 +1,68 @@
+name: Report an issue
+description: Report a bug, request a feature, or suggest a documentation change
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve awswap.
+
+        Do not include AWS account IDs, profile names, tokens, registry credentials, or other secrets. Report security flaws through the repository's [private security advisory form](https://github.com/drew-simmons/awswap/security/advisories/new) instead.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Issue type
+      options:
+        - Bug
+        - Feature request
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Give a short, clear account of the issue or request.
+      placeholder: What should change?
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: For a bug, include the steps to reproduce it, what happened, and what you expected. For a request, explain the goal and why it matters.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: awswap version
+      description: Run `awswap --version` if awswap is installed.
+      placeholder: awswap 0.2.0
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Include your operating system, shell, and AWS CLI version when relevant.
+      placeholder: macOS 15, Zsh 5.9, AWS CLI 2.x
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or other context
+      description: Add sanitized logs, screenshots, or links that may help.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched for an existing issue before opening this one.
+          required: true
+        - label: I removed account IDs, profile names, tokens, registry credentials, and other secrets.
+          required: true
