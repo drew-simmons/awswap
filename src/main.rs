@@ -1,3 +1,4 @@
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use inquire::{Select, error::InquireError};
 use owo_colors::OwoColorize;
 use std::collections::BTreeSet;
@@ -9,60 +10,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Output, Stdio};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const HELP: &str = r#"awswap — quickly switch AWS profiles
-
-Usage:
-  awswap [options]                  Interactively choose and activate a profile
-  awswap [options] <profile>        Activate a profile
-  awswap [options] -                Switch to the previous profile
-  awswap current                    Print the active profile
-  awswap list                       List configured profiles
-  awswap status [profile]           Show identity and integration status
-  awswap doctor [profile]           Diagnose configuration and credentials
-  awswap login [options] [profile]  Refresh AWS and ECR authentication
-  awswap init <shell>               Print a shell hook (bash, zsh, or fish)
-  awswap completions <shell>        Print shell completions
-  awswap help
-
-Options:
-      --no-ecr              Skip automatic Docker/Helm ECR login
-  -r, --registry <value>    ECR registry hostname or account ID (repeatable)
-  -q, --quiet               Suppress progress and success output
-      --json                Emit machine-readable JSON where supported
-  -v, --verbose             Show commands and detailed AWS failures
-  -h, --help                Show help
-  -V, --version             Show version
-
-Environment:
-  AWSWAP_HOME               State directory (default: $XDG_STATE_HOME/awswap)
-  AWSWAP_NO_ECR             Skip automatic Docker/Helm ECR login
-  AWSWAP_ECR_REGISTRIES     Comma-separated registry hosts or account IDs
-  NO_COLOR                  Disable colored output
+const AFTER_HELP: &str = r#"Environment:
+  AWSWAP_HOME            State directory (default: $XDG_STATE_HOME/awswap)
+  AWSWAP_NO_ECR          Skip automatic Docker/Helm ECR login
+  AWSWAP_ECR_REGISTRIES  Comma-separated registry hosts or account IDs
+  NO_COLOR               Disable colored output
 
 Install the hook once so `awswap` updates the current shell:
-  eval "$(awswap init zsh)" # use bash or fish as appropriate
-"#;
+  eval "$(awswap init zsh)" # use bash or fish as appropriate"#;
 
 type Result<T> = std::result::Result<T, String>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 enum Shell {
     Bash,
     Zsh,
     Fish,
-}
-
-impl Shell {
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "bash" => Ok(Self::Bash),
-            "zsh" => Ok(Self::Zsh),
-            "fish" => Ok(Self::Fish),
-            _ => Err(format!(
-                "unsupported shell '{value}'; expected bash, zsh, or fish"
-            )),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,13 +118,98 @@ impl Identity {
     }
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Args, Debug, Default, Eq, PartialEq)]
 struct Options {
+    /// Skip automatic Docker/Helm ECR login
+    #[arg(long, global = true)]
     no_ecr: bool,
+
+    /// ECR registry hostname or account ID; repeatable
+    #[arg(
+        short = 'r',
+        long = "registry",
+        global = true,
+        value_name = "VALUE",
+        value_delimiter = ',',
+        value_parser = parse_registry
+    )]
     registries: Vec<String>,
+
+    /// Suppress progress and success output
+    #[arg(short, long, global = true, conflicts_with = "verbose")]
     quiet: bool,
+
+    /// Emit machine-readable JSON where supported
+    #[arg(long, global = true)]
     json: bool,
+
+    /// Show commands and detailed AWS failures
+    #[arg(short, long, global = true)]
     verbose: bool,
+}
+
+#[derive(Debug, Parser)]
+#[command(name = "awswap", version, about = "Quickly switch AWS profiles")]
+#[command(
+    after_help = AFTER_HELP,
+    override_usage = "awswap [OPTIONS] [PROFILE]\n       awswap [OPTIONS] <COMMAND>"
+)]
+struct Cli {
+    #[command(flatten)]
+    options: Options,
+
+    /// AWS profile to activate, or `-` to switch to the previous profile
+    #[arg(value_name = "PROFILE")]
+    profile: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum CliCommand {
+    /// Print the active profile
+    Current,
+
+    /// List configured profiles
+    #[command(visible_alias = "ls")]
+    List,
+
+    /// Show identity and integration status
+    Status {
+        /// AWS profile to inspect
+        profile: Option<String>,
+    },
+
+    /// Diagnose configuration and credentials
+    Doctor {
+        /// AWS profile to inspect
+        profile: Option<String>,
+    },
+
+    /// Refresh AWS and ECR authentication
+    Login {
+        /// AWS profile to authenticate
+        profile: Option<String>,
+    },
+
+    /// Print a shell hook
+    Init {
+        /// Shell to target
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+
+    /// Print shell completions
+    Completions {
+        /// Shell to target
+        #[arg(value_enum)]
+        shell: Shell,
+    },
+
+    /// Print the version
+    #[command(hide = true)]
+    Version,
 }
 
 impl Options {
@@ -215,7 +263,7 @@ fn main() -> ExitCode {
     if env::var_os("NO_COLOR").is_some() {
         owo_colors::set_override(false);
     }
-    match run(env::args().skip(1).collect()) {
+    match run(Cli::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if error.is_empty() => ExitCode::SUCCESS,
         Err(error) => {
@@ -225,86 +273,42 @@ fn main() -> ExitCode {
     }
 }
 
-fn parse_cli(args: Vec<String>) -> Result<(Vec<String>, Options)> {
-    let mut positional = Vec::new();
-    let mut options = Options::default();
-    let mut arguments = args.into_iter();
-    while let Some(argument) = arguments.next() {
-        match argument.as_str() {
-            "--no-ecr" => options.no_ecr = true,
-            "-q" | "--quiet" => options.quiet = true,
-            "--json" => options.json = true,
-            "-v" | "--verbose" => options.verbose = true,
-            "-r" | "--registry" => {
-                let value = arguments
-                    .next()
-                    .ok_or_else(|| format!("{argument} requires a value"))?;
-                add_registries(&mut options.registries, &value);
-            }
-            "--" => {
-                positional.extend(arguments);
-                break;
-            }
-            "-" | "-h" | "--help" | "-V" | "--version" => positional.push(argument),
-            _ if argument.starts_with("--registry=") => {
-                add_registries(
-                    &mut options.registries,
-                    argument.trim_start_matches("--registry="),
-                );
-            }
-            _ if argument.starts_with('-') => return Err(format!("unknown option '{argument}'")),
-            _ => positional.push(argument),
-        }
+fn parse_registry(value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err("registry cannot be empty".into())
+    } else {
+        Ok(value.to_string())
     }
-    if options.quiet && options.verbose {
-        return Err("--quiet and --verbose cannot be used together".into());
-    }
-    Ok((positional, options))
 }
 
-fn add_registries(registries: &mut Vec<String>, value: &str) {
-    registries.extend(
-        value
-            .split(',')
-            .map(str::trim)
-            .filter(|item| !item.is_empty())
-            .map(str::to_string),
-    );
-}
-
-fn run(args: Vec<String>) -> Result<()> {
-    let (args, options) = parse_cli(args)?;
-    match args.as_slice() {
-        [] => switch(None, &options),
-        [arg] if arg == "-h" || arg == "--help" || arg == "help" => {
-            print!("{HELP}");
+fn run(cli: Cli) -> Result<()> {
+    let Cli {
+        options,
+        profile,
+        command,
+    } = cli;
+    match (profile, command) {
+        (Some(_), Some(_)) => Err("a profile cannot be used with a command".into()),
+        (Some(profile), None) if profile == "-" => switch_previous(&options),
+        (profile, None) => switch(profile.as_ref(), &options),
+        (None, Some(CliCommand::Current)) => current_profile(&options),
+        (None, Some(CliCommand::List)) => list_profiles(&options),
+        (None, Some(CliCommand::Status { profile })) => status(profile.as_ref(), &options),
+        (None, Some(CliCommand::Doctor { profile })) => doctor(profile.as_ref(), &options),
+        (None, Some(CliCommand::Login { profile })) => login(profile.as_ref(), &options),
+        (None, Some(CliCommand::Init { shell })) => {
+            print_shell_hook(shell);
             Ok(())
         }
-        [arg] if arg == "-V" || arg == "--version" || arg == "version" => {
+        (None, Some(CliCommand::Completions { shell })) => {
+            print_completions(shell);
+            Ok(())
+        }
+        (None, Some(CliCommand::Version)) => {
             println!("awswap {VERSION}");
             Ok(())
         }
-        [arg] if arg == "list" || arg == "ls" => list_profiles(&options),
-        [arg] if arg == "current" => current_profile(&options),
-        [arg] if arg == "status" => status(None, &options),
-        [command, profile] if command == "status" => status(Some(profile), &options),
-        [arg] if arg == "doctor" => doctor(None, &options),
-        [command, profile] if command == "doctor" => doctor(Some(profile), &options),
-        [arg] if arg == "-" => switch_previous(&options),
-        [arg] if arg == "login" => login(None, &options),
-        [command, profile] if command == "login" => login(Some(profile), &options),
-        [command, shell] if command == "init" => {
-            print_shell_hook(Shell::parse(shell)?);
-            Ok(())
-        }
-        [command, shell] if command == "completions" => {
-            print_completions(Shell::parse(shell)?);
-            Ok(())
-        }
-        [profile] => switch(Some(profile), &options),
-        [command, ..] => Err(format!(
-            "unknown command or invalid arguments: {command}\n\n{HELP}"
-        )),
     }
 }
 
@@ -1725,6 +1729,10 @@ end
 mod tests {
     use super::*;
 
+    fn parse_args(values: &[&str]) -> clap::error::Result<Cli> {
+        Cli::try_parse_from(std::iter::once("awswap").chain(values.iter().copied()))
+    }
+
     #[test]
     fn parses_profiles_from_config_and_credentials() {
         let contents = r#"
@@ -1879,24 +1887,65 @@ mod tests {
 
     #[test]
     fn parses_global_flags_in_any_position() {
-        let (args, options) = parse_cli(vec![
-            "login".into(),
-            "--no-ecr".into(),
-            "dev".into(),
-            "--registry=123456789012,registry.example.com".into(),
-            "--json".into(),
+        let cli = parse_args(&[
+            "login",
+            "--no-ecr",
+            "dev",
+            "--registry=123456789012,registry.example.com",
+            "--json",
         ])
         .unwrap();
-        assert_eq!(args, ["login", "dev"]);
-        assert!(options.no_ecr);
-        assert!(options.json);
-        assert_eq!(options.registries, ["123456789012", "registry.example.com"]);
+        assert!(cli.options.no_ecr);
+        assert!(cli.options.json);
+        assert_eq!(
+            cli.options.registries,
+            ["123456789012", "registry.example.com"]
+        );
+        assert!(matches!(
+            cli.command,
+            Some(CliCommand::Login {
+                profile: Some(ref profile)
+            }) if profile == "dev"
+        ));
+
+        let cli = parse_args(&["--json", "current"]).unwrap();
+        assert!(cli.options.json);
+        assert!(matches!(cli.command, Some(CliCommand::Current)));
     }
 
     #[test]
-    fn rejects_conflicting_output_flags() {
-        assert!(parse_cli(vec!["--quiet".into(), "--verbose".into()]).is_err());
-        assert!(parse_cli(vec!["--unknown".into()]).is_err());
+    fn validates_command_line_arguments() {
+        assert_eq!(
+            parse_args(&["--quiet", "--verbose"]).unwrap_err().kind(),
+            clap::error::ErrorKind::ArgumentConflict
+        );
+        assert_eq!(
+            parse_args(&["--unknown"]).unwrap_err().kind(),
+            clap::error::ErrorKind::UnknownArgument
+        );
+        assert_eq!(
+            parse_args(&["--registry", "--json", "dev"])
+                .unwrap_err()
+                .kind(),
+            clap::error::ErrorKind::InvalidValue
+        );
+    }
+
+    #[test]
+    fn supports_previous_profile_and_scoped_help() {
+        let cli = parse_args(&["-"]).unwrap();
+        assert_eq!(cli.profile.as_deref(), Some("-"));
+        assert!(cli.command.is_none());
+
+        assert_eq!(
+            run(parse_args(&["dev", "current"]).unwrap()),
+            Err("a profile cannot be used with a command".into())
+        );
+
+        assert_eq!(
+            parse_args(&["status", "--help"]).unwrap_err().kind(),
+            clap::error::ErrorKind::DisplayHelp
+        );
     }
 
     #[test]
