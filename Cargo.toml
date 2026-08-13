@@ -1,6 +1,6 @@
 [package]
 name = "awswap"
-version = "0.3.0"
+version = "0.4.0"
 publish = ["crates-io"]
 edition = "2024"
 rust-version = "1.88"

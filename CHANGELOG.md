@@ -3,6 +3,14 @@
 All notable changes to this project are documented in this file. Release Please
 generates entries and versions from Conventional Commits.
 
+## [0.4.0](https://github.com/drew-simmons/awswap/compare/v0.3.0...v0.4.0) (2026-08-13)
+
+
+### Features
+
+* add clap parse support ([#11](https://github.com/drew-simmons/awswap/issues/11)) ([d705f27](https://github.com/drew-simmons/awswap/commit/d705f27ab9ab4ca4ff752c78a1e151f3ff6939fc))
+* get better `CRAP` score ([#15](https://github.com/drew-simmons/awswap/issues/15)) ([d9555ea](https://github.com/drew-simmons/awswap/commit/d9555ea0c611c77c144c6f7a7d38387d489039ec))
+
 ## [0.3.0](https://github.com/drew-simmons/awswap/compare/v0.2.0...v0.3.0) (2026-08-06)
 
 ### Features
