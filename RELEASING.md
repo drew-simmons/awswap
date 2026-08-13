@@ -14,6 +14,8 @@ Linux archives, checksums, and shell installer for each generated tag.
 2. Add it as the repository Actions secret `RELEASE_PLEASE_TOKEN`.
 3. In **Settings → Actions → General**, allow GitHub Actions to create pull
    requests if repository or organization policy otherwise blocks them.
+4. Create a crates.io API token and add it as the repository Actions secret
+   `CARGO_REGISTRY_TOKEN`.
 
 A dedicated token is intentional: GitHub suppresses workflow events created by
 the default `GITHUB_TOKEN`. The token lets CI run on Release PRs and lets a
@@ -41,6 +43,7 @@ keeps implementation-only commit types out of the public changelog.
 5. The tag starts cargo-dist. After every target builds successfully,
    cargo-dist attaches the archives, checksums, and `awswap-installer.sh`, then
    publishes the draft release.
+6. The release workflow publishes the same version to crates.io.
 
 The repository is bootstrapped at version `0.0.0`. Use `feat: initial release`
 for the initial repository commit so the first Release PR proposes `v0.1.0`.
@@ -50,8 +53,9 @@ create release tags. If a cargo-dist run fails, fix the cause and rerun the
 failed workflow from GitHub Actions; the existing draft remains unpublished.
 
 The generated `.github/workflows/release.yml` contains a deliberate integration
-that uploads to release-please's existing draft. If `dist generate` rewrites the
-workflow, preserve or restore its `Publish GitHub Release` step.
+that uploads to release-please's existing draft and publishes the crate to
+crates.io. If `dist generate` rewrites the workflow, preserve or restore its
+`Publish GitHub Release` and `Publish crate to crates.io` steps.
 
 Do not move or recreate a published tag. Fix released defects with a new patch
 release.
