@@ -259,11 +259,28 @@ struct DoctorCheck {
     detail: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct StatusReport {
+    profile: String,
+    config: ProfileConfig,
+    identity: Identity,
+    clients: Vec<&'static str>,
+    shell_hook: bool,
+}
+
 fn main() -> ExitCode {
+    configure_color();
+    exit_code(run(Cli::parse()))
+}
+
+fn configure_color() {
     if env::var_os("NO_COLOR").is_some() {
         owo_colors::set_override(false);
     }
-    match run(Cli::parse()) {
+}
+
+fn exit_code(result: Result<()>) -> ExitCode {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) if error.is_empty() => ExitCode::SUCCESS,
         Err(error) => {
@@ -288,64 +305,122 @@ fn run(cli: Cli) -> Result<()> {
         profile,
         command,
     } = cli;
-    match (profile, command) {
-        (Some(_), Some(_)) => Err("a profile cannot be used with a command".into()),
-        (Some(profile), None) if profile == "-" => switch_previous(&options),
-        (profile, None) => switch(profile.as_ref(), &options),
-        (None, Some(CliCommand::Current)) => current_profile(&options),
-        (None, Some(CliCommand::List)) => list_profiles(&options),
-        (None, Some(CliCommand::Status { profile })) => status(profile.as_ref(), &options),
-        (None, Some(CliCommand::Doctor { profile })) => doctor(profile.as_ref(), &options),
-        (None, Some(CliCommand::Login { profile })) => login(profile.as_ref(), &options),
-        (None, Some(CliCommand::Init { shell })) => {
+    reject_mixed_action(&profile, &command)?;
+    match command {
+        Some(command) => run_command(command, &options),
+        None => run_switch(profile.as_ref(), &options),
+    }
+}
+
+fn reject_mixed_action(profile: &Option<String>, command: &Option<CliCommand>) -> Result<()> {
+    if profile.is_some() && command.is_some() {
+        Err("a profile cannot be used with a command".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn run_switch(profile: Option<&String>, options: &Options) -> Result<()> {
+    if profile.is_some_and(|profile| profile == "-") {
+        switch_previous(options)
+    } else {
+        switch(profile, options)
+    }
+}
+
+fn run_command(command: CliCommand, options: &Options) -> Result<()> {
+    match command {
+        CliCommand::Current => current_profile(options),
+        CliCommand::List => list_profiles(options),
+        CliCommand::Status { profile } => status(profile.as_ref(), options),
+        other => run_command_secondary(other, options),
+    }
+}
+
+fn run_command_secondary(command: CliCommand, options: &Options) -> Result<()> {
+    match command {
+        CliCommand::Doctor { profile } => doctor(profile.as_ref(), options),
+        CliCommand::Login { profile } => login(profile.as_ref(), options),
+        CliCommand::Init { shell } => {
             print_shell_hook(shell);
             Ok(())
         }
-        (None, Some(CliCommand::Completions { shell })) => {
+        other => run_command_output(other),
+    }
+}
+
+fn run_command_output(command: CliCommand) -> Result<()> {
+    match command {
+        CliCommand::Completions { shell } => {
             print_completions(shell);
             Ok(())
         }
-        (None, Some(CliCommand::Version)) => {
+        CliCommand::Version => {
             println!("awswap {VERSION}");
             Ok(())
         }
+        _ => unreachable!("command was handled by an earlier dispatch stage"),
     }
 }
 
 fn switch(requested: Option<&String>, options: &Options) -> Result<()> {
-    require_command("aws")?;
-    let profiles = discover_profiles()?;
-    if profiles.is_empty() {
-        return Err("no AWS profiles found; run `aws configure sso` first".into());
-    }
-
-    let mut state = load_state()?;
-    let profile = match requested {
-        Some(profile) => {
-            ensure_profile_exists(profile, &profiles)?;
-            profile.clone()
-        }
-        None if io::stdin().is_terminal() && io::stderr().is_terminal() => {
-            select_profile(&profiles, &state)?
-        }
-        None => {
-            return Err("interactive selection requires a terminal; pass a profile name".into());
-        }
-    };
-
+    let (profiles, mut state) = switch_context()?;
+    let profile = profile_for_switch(requested, &profiles, &state)?;
     activate(&profile, &mut state, true, options)
 }
 
-fn switch_previous(options: &Options) -> Result<()> {
+fn switch_context() -> Result<(Vec<String>, State)> {
     require_command("aws")?;
     let profiles = discover_profiles()?;
-    let mut state = load_state()?;
+    require_profiles(&profiles)?;
+    Ok((profiles, load_state()?))
+}
+
+fn require_profiles(profiles: &[String]) -> Result<()> {
+    if profiles.is_empty() {
+        Err("no AWS profiles found; run `aws configure sso` first".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn profile_for_switch(
+    requested: Option<&String>,
+    profiles: &[String],
+    state: &State,
+) -> Result<String> {
+    match requested {
+        Some(profile) => named_profile_for_switch(profile, profiles),
+        None => unnamed_profile_for_switch(profiles, state),
+    }
+}
+
+fn unnamed_profile_for_switch(profiles: &[String], state: &State) -> Result<String> {
+    if io::stdin().is_terminal() && io::stderr().is_terminal() {
+        select_profile(profiles, state)
+    } else {
+        Err("interactive selection requires a terminal; pass a profile name".into())
+    }
+}
+
+fn named_profile_for_switch(profile: &str, profiles: &[String]) -> Result<String> {
+    ensure_profile_exists(profile, profiles)?;
+    Ok(profile.to_string())
+}
+
+fn switch_previous(options: &Options) -> Result<()> {
+    let (profiles, mut state) = switch_context()?;
+    let previous = previous_profile(&state, &profiles)?;
+    activate(&previous, &mut state, true, options)
+}
+
+fn previous_profile(state: &State, profiles: &[String]) -> Result<String> {
     let previous = state
         .previous
         .clone()
         .ok_or_else(|| "no previous AWS profile".to_string())?;
-    ensure_profile_exists(&previous, &profiles)?;
-    activate(&previous, &mut state, true, options)
+    ensure_profile_exists(&previous, profiles)?;
+    Ok(previous)
 }
 
 fn activate(
@@ -355,7 +430,19 @@ fn activate(
     options: &Options,
 ) -> Result<()> {
     let identity = ensure_credentials(profile, options)?;
+    update_state(profile, state)?;
+    let profile_config = read_profile_config(profile)?;
+    finish_activation(
+        profile,
+        &identity,
+        &profile_config,
+        authenticate_ecr,
+        options,
+    );
+    Ok(())
+}
 
+fn update_state(profile: &str, state: &mut State) -> Result<()> {
     let old_current = state.current.clone();
     if old_current.as_deref() != Some(profile) {
         state.previous = old_current;
@@ -364,10 +451,35 @@ fn activate(
     state.recent.retain(|recent| recent != profile);
     state.recent.insert(0, profile.to_string());
     state.recent.truncate(8);
-    save_state(state)?;
+    save_state(state)
+}
 
-    let profile_config = read_profile_config(profile)?;
+fn finish_activation(
+    profile: &str,
+    identity: &Identity,
+    profile_config: &ProfileConfig,
+    authenticate_ecr: bool,
+    options: &Options,
+) {
     let hook_active = shell_hook_active();
+    print_activation(profile, identity, profile_config, hook_active, options);
+    maybe_authenticate_ecr(
+        profile,
+        profile_config,
+        authenticate_ecr,
+        hook_active,
+        options,
+    );
+    print_shell_tip(hook_active, options);
+}
+
+fn print_activation(
+    profile: &str,
+    identity: &Identity,
+    profile_config: &ProfileConfig,
+    hook_active: bool,
+    options: &Options,
+) {
     if options.json {
         println!(
             "{}",
@@ -392,11 +504,17 @@ fn activate(
             identity.display_name().dimmed(),
         );
     }
+}
 
-    if authenticate_ecr
-        && !options.no_ecr
-        && !env_flag("AWSWAP_NO_ECR")
-        && let Err(error) = login_ecr(profile, &profile_config, options)
+fn maybe_authenticate_ecr(
+    profile: &str,
+    profile_config: &ProfileConfig,
+    authenticate_ecr: bool,
+    hook_active: bool,
+    options: &Options,
+) {
+    if should_authenticate_ecr(authenticate_ecr, options)
+        && let Err(error) = login_ecr(profile, profile_config, options)
     {
         eprintln!("{} {error}", "warning:".yellow().bold());
         let state = if hook_active { "active" } else { "selected" };
@@ -405,29 +523,57 @@ fn activate(
             format!("AWS profile is {state}; retry with `awswap login`.").dimmed()
         );
     }
+}
 
-    if !hook_active && !options.quiet && !options.json && io::stdout().is_terminal() {
+fn should_authenticate_ecr(authenticate_ecr: bool, options: &Options) -> bool {
+    authenticate_ecr && !options.no_ecr && !env_flag("AWSWAP_NO_ECR")
+}
+
+fn print_shell_tip(hook_active: bool, options: &Options) {
+    if should_print_shell_tip(hook_active, options) {
         eprintln!(
             "{} shell unchanged; run {} once to activate future selections",
             "tip:".cyan().bold(),
             shell_setup_hint().cyan()
         );
     }
-    Ok(())
+}
+
+fn should_print_shell_tip(hook_active: bool, options: &Options) -> bool {
+    !hook_active && !options.quiet && !options.json && io::stdout().is_terminal()
 }
 
 fn login(requested: Option<&String>, options: &Options) -> Result<()> {
     require_command("aws")?;
+    let profile = login_profile(requested)?;
+    let identity = authenticate_profile(&profile, options)?;
+    print_login(&profile, &identity, options);
+    Ok(())
+}
+
+fn login_profile(requested: Option<&String>) -> Result<String> {
     let profiles = discover_profiles()?;
     let state = load_state()?;
-    let profile = resolve_profile(requested, &profiles, &state)?;
+    resolve_profile(requested, &profiles, &state)
+}
 
-    refresh_credentials(&profile, options)?;
-    let identity = validate_credentials(&profile, options)?;
-    let config = read_profile_config(&profile)?;
-    if !options.no_ecr && !env_flag("AWSWAP_NO_ECR") {
-        login_ecr(&profile, &config, options)?;
+fn authenticate_profile(profile: &str, options: &Options) -> Result<Identity> {
+    refresh_credentials(profile, options)?;
+    let identity = validate_credentials(profile, options)?;
+    let config = read_profile_config(profile)?;
+    login_ecr_if_enabled(profile, &config, options)?;
+    Ok(identity)
+}
+
+fn login_ecr_if_enabled(profile: &str, config: &ProfileConfig, options: &Options) -> Result<()> {
+    if should_authenticate_ecr(true, options) {
+        login_ecr(profile, config, options)
+    } else {
+        Ok(())
     }
+}
+
+fn print_login(profile: &str, identity: &Identity, options: &Options) {
     if options.json {
         println!(
             "{}",
@@ -436,7 +582,6 @@ fn login(requested: Option<&String>, options: &Options) -> Result<()> {
     } else if !options.quiet {
         println!("{} {}", "✓ Authenticated".green().bold(), profile.bold());
     }
-    Ok(())
 }
 
 fn resolve_profile(
@@ -457,46 +602,84 @@ fn resolve_profile(
 
 fn list_profiles(options: &Options) -> Result<()> {
     let profiles = discover_profiles()?;
-    if profiles.is_empty() {
-        return Err("no AWS profiles found".into());
-    }
+    require_list_profiles(&profiles)?;
     let state = load_state()?;
     let current = effective_profile(&state);
     let ordered = ordered_profiles(&profiles, &state, current.as_deref());
-    if options.json {
-        let values: Vec<_> = ordered
-            .iter()
-            .map(|profile| {
-                let config = read_profile_config(profile).unwrap_or_default();
-                serde_json::json!({
-                    "name": profile,
-                    "current": current.as_deref() == Some(profile.as_str()),
-                    "previous": state.previous.as_deref() == Some(profile.as_str()),
-                    "region": config.region,
-                    "auth": config.auth_label(),
-                })
-            })
-            .collect();
-        println!("{}", serde_json::Value::Array(values));
-    } else if io::stdout().is_terminal() && !options.quiet {
-        let config_contents = read_aws_config_contents()?;
-        for choice in profile_choices(&ordered, &state, current.as_deref(), &config_contents) {
-            let marker = match choice.marker {
-                "● " => "●".green().to_string(),
-                "↩ " => "↩".cyan().to_string(),
-                _ => " ".into(),
-            };
-            println!(
-                "{} {:<24} {:<15} {:<11} {}",
-                marker, choice.name, choice.region, choice.auth, choice.account
-            );
-        }
+    print_profiles(&ordered, &state, current.as_deref(), options)
+}
+
+fn require_list_profiles(profiles: &[String]) -> Result<()> {
+    if profiles.is_empty() {
+        Err("no AWS profiles found".into())
     } else {
-        for profile in ordered {
-            println!("{profile}");
-        }
+        Ok(())
+    }
+}
+
+fn print_profiles(
+    ordered: &[String],
+    state: &State,
+    current: Option<&str>,
+    options: &Options,
+) -> Result<()> {
+    if options.json {
+        print_profiles_json(ordered, state, current);
+        return Ok(());
+    }
+    print_profiles_text(ordered, state, current, options)
+}
+
+fn print_profiles_text(
+    ordered: &[String],
+    state: &State,
+    current: Option<&str>,
+    options: &Options,
+) -> Result<()> {
+    if io::stdout().is_terminal() && !options.quiet {
+        return print_profiles_table(ordered, state, current);
+    }
+    for profile in ordered {
+        println!("{profile}");
     }
     Ok(())
+}
+
+fn print_profiles_json(ordered: &[String], state: &State, current: Option<&str>) {
+    let values: Vec<_> = ordered
+        .iter()
+        .map(|profile| {
+            let config = read_profile_config(profile).unwrap_or_default();
+            serde_json::json!({
+                "name": profile,
+                "current": current == Some(profile.as_str()),
+                "previous": state.previous.as_deref() == Some(profile.as_str()),
+                "region": config.region,
+                "auth": config.auth_label(),
+            })
+        })
+        .collect();
+    println!("{}", serde_json::Value::Array(values));
+}
+
+fn print_profiles_table(ordered: &[String], state: &State, current: Option<&str>) -> Result<()> {
+    let config_contents = read_aws_config_contents()?;
+    for choice in profile_choices(ordered, state, current, &config_contents) {
+        print_profile_choice(&choice);
+    }
+    Ok(())
+}
+
+fn print_profile_choice(choice: &ProfileChoice) {
+    let marker = match choice.marker {
+        "● " => "●".green().to_string(),
+        "↩ " => "↩".cyan().to_string(),
+        _ => " ".into(),
+    };
+    println!(
+        "{} {:<24} {:<15} {:<11} {}",
+        marker, choice.name, choice.region, choice.auth, choice.account
+    );
 }
 
 fn current_profile(options: &Options) -> Result<()> {
@@ -565,37 +748,63 @@ fn profile_choices(
 fn select_profile(profiles: &[String], state: &State) -> Result<String> {
     let current = effective_profile(state);
     let ordered = ordered_profiles(profiles, state, current.as_deref());
-    let config_contents = read_aws_config_contents()?;
-    let choices = profile_choices(&ordered, state, current.as_deref(), &config_contents);
+    read_aws_config_contents().and_then(|config_contents| {
+        prompt_for_profile(&ordered, state, current.as_deref(), &config_contents)
+    })
+}
+
+fn prompt_for_profile(
+    ordered: &[String],
+    state: &State,
+    current: Option<&str>,
+    config_contents: &str,
+) -> Result<String> {
+    let choices = profile_choices(ordered, state, current, config_contents);
     Select::new("AWS profile", choices)
         .with_starting_cursor(0)
         .with_page_size(ordered.len().min(12))
         .with_help_message("↑↓ move • type filter • enter select • esc cancel")
         .prompt()
         .map(|choice| choice.name)
-        .map_err(|error| match error {
-            InquireError::OperationCanceled | InquireError::OperationInterrupted => String::new(),
-            other => format!("could not read selection: {other}"),
-        })
+        .map_err(selection_error)
+}
+
+fn selection_error(error: InquireError) -> String {
+    match error {
+        InquireError::OperationCanceled | InquireError::OperationInterrupted => String::new(),
+        other => format!("could not read selection: {other}"),
+    }
 }
 
 fn ensure_credentials(profile: &str, options: &Options) -> Result<Identity> {
     match validate_credentials(profile, options) {
         Ok(identity) => Ok(identity),
-        Err(first_error) if !first_error.contains("`awswap login") => Err(first_error),
-        Err(first_error) => {
-            if !options.quiet && !options.json {
-                eprintln!(
-                    "{} credentials for {} need refreshing",
-                    "auth:".yellow().bold(),
-                    profile.bold()
-                );
-            }
-            refresh_credentials(profile, options).map_err(|login_error| {
-                format!("credentials are unavailable ({first_error}); {login_error}")
-            })?;
-            validate_credentials(profile, options)
-        }
+        Err(first_error) => refresh_expired_credentials(profile, options, first_error),
+    }
+}
+
+fn refresh_expired_credentials(
+    profile: &str,
+    options: &Options,
+    first_error: String,
+) -> Result<Identity> {
+    if !first_error.contains("`awswap login") {
+        return Err(first_error);
+    }
+    print_refresh_notice(profile, options);
+    refresh_credentials(profile, options).map_err(|login_error| {
+        format!("credentials are unavailable ({first_error}); {login_error}")
+    })?;
+    validate_credentials(profile, options)
+}
+
+fn print_refresh_notice(profile: &str, options: &Options) {
+    if !options.quiet && !options.json {
+        eprintln!(
+            "{} credentials for {} need refreshing",
+            "auth:".yellow().bold(),
+            profile.bold()
+        );
     }
 }
 
@@ -630,16 +839,24 @@ fn parse_identity(bytes: &[u8]) -> Result<Identity> {
 
 fn refresh_credentials(profile: &str, options: &Options) -> Result<()> {
     let config = read_profile_config(profile)?;
-    let login_args: &[&str] = if config.is_sso {
-        &["sso", "login"]
-    } else if config.is_login {
-        &["login"]
-    } else {
-        return Err(format!(
-            "profile '{profile}' is not configured for SSO or `aws login`; refresh its credentials manually"
-        ));
-    };
+    let login_args = credential_login_args(profile, &config)?;
+    print_login_notice(profile, options);
+    run_aws_login(profile, login_args, options)
+}
 
+fn credential_login_args<'a>(profile: &str, config: &ProfileConfig) -> Result<&'a [&'a str]> {
+    if config.is_sso {
+        Ok(&["sso", "login"])
+    } else if config.is_login {
+        Ok(&["login"])
+    } else {
+        Err(format!(
+            "profile '{profile}' is not configured for SSO or `aws login`; refresh its credentials manually"
+        ))
+    }
+}
+
+fn print_login_notice(profile: &str, options: &Options) {
     if !options.quiet && !options.json {
         eprintln!(
             "{} opening AWS sign-in for {}…",
@@ -647,6 +864,9 @@ fn refresh_credentials(profile: &str, options: &Options) -> Result<()> {
             profile.bold()
         );
     }
+}
+
+fn run_aws_login(profile: &str, login_args: &[&str], options: &Options) -> Result<()> {
     options.trace("aws", login_args);
     let status = Command::new("aws")
         .args(login_args)
@@ -668,61 +888,109 @@ fn login_ecr(profile: &str, config: &ProfileConfig, options: &Options) -> Result
     if registries.is_empty() {
         return Ok(());
     }
+    login_ecr_registries(profile, config, options, &registries)
+}
 
-    let has_docker = command_exists("docker");
-    let has_helm = command_exists("helm");
-    if !has_docker && !has_helm {
-        return Err("Docker and Helm are not installed; skipped ECR login".into());
-    }
-
+fn login_ecr_registries(
+    profile: &str,
+    config: &ProfileConfig,
+    options: &Options,
+    registries: &[String],
+) -> Result<()> {
+    let clients = installed_registry_clients()?;
     let region = config
         .region
         .as_deref()
         .ok_or_else(|| format!("profile '{profile}' has no region; skipped ECR login"))?;
+    let password = ecr_password(profile, region, options)?;
+    let failures = registry_login_failures(profile, registries, &clients, &password, options);
+    finish_registry_logins(failures)
+}
+
+fn installed_registry_clients() -> Result<Vec<RegistryClient>> {
+    let clients = [RegistryClient::Docker, RegistryClient::Helm]
+        .into_iter()
+        .filter(|client| command_exists(client.command()))
+        .collect::<Vec<_>>();
+    if clients.is_empty() {
+        Err("Docker and Helm are not installed; skipped ECR login".into())
+    } else {
+        Ok(clients)
+    }
+}
+
+fn ecr_password(profile: &str, region: &str, options: &Options) -> Result<Vec<u8>> {
     options.progress(format!("Requesting ECR credentials in {region}…"));
-    let password_output = aws_output(
+    let output = aws_output(
         profile,
         &["ecr", "get-login-password", "--region", region],
         options,
     )?;
-    if !password_output.status.success() {
-        return Err(aws_command_error(
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        Err(aws_command_error(
             "could not get an ECR login token",
             profile,
-            &password_output,
+            &output,
             options.verbose,
-        ));
+        ))
     }
-    let password = password_output.stdout;
+}
 
+fn registry_login_failures(
+    profile: &str,
+    registries: &[String],
+    clients: &[RegistryClient],
+    password: &[u8],
+    options: &Options,
+) -> Vec<String> {
     let mut failures = Vec::new();
     for registry in registries {
-        for client in [RegistryClient::Docker, RegistryClient::Helm] {
-            let installed = match client {
-                RegistryClient::Docker => has_docker,
-                RegistryClient::Helm => has_helm,
-            };
-            if !installed {
-                continue;
-            }
+        failures.extend(registry_failures(
+            profile, registry, clients, password, options,
+        ));
+    }
+    failures
+}
 
-            match registry_login(client, profile, &registry, &password) {
-                Ok(method) => {
-                    if !options.quiet && !options.json {
-                        let detail = match method {
-                            RegistryLoginMethod::Password => String::new(),
-                            RegistryLoginMethod::EcrCredentialHelper => {
-                                format!("  {}", "(ecr-login)".dimmed())
-                            }
-                        };
-                        eprintln!("{} {:<7} {registry}{detail}", "✓".green(), client.label());
-                    }
-                }
-                Err(error) => failures.push(error),
-            }
+fn registry_failures(
+    profile: &str,
+    registry: &str,
+    clients: &[RegistryClient],
+    password: &[u8],
+    options: &Options,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for &client in clients {
+        match registry_login(client, profile, registry, password) {
+            Ok(method) => print_registry_login(client, registry, method, options),
+            Err(error) => failures.push(error),
         }
     }
+    failures
+}
 
+fn print_registry_login(
+    client: RegistryClient,
+    registry: &str,
+    method: RegistryLoginMethod,
+    options: &Options,
+) {
+    if !options.quiet && !options.json {
+        let detail = registry_login_detail(method);
+        eprintln!("{} {:<7} {registry}{detail}", "✓".green(), client.label());
+    }
+}
+
+fn registry_login_detail(method: RegistryLoginMethod) -> String {
+    match method {
+        RegistryLoginMethod::Password => String::new(),
+        RegistryLoginMethod::EcrCredentialHelper => format!("  {}", "(ecr-login)".dimmed()),
+    }
+}
+
+fn finish_registry_logins(failures: Vec<String>) -> Result<()> {
     if failures.is_empty() {
         Ok(())
     } else {
@@ -731,23 +999,19 @@ fn login_ecr(profile: &str, config: &ProfileConfig, options: &Options) -> Result
 }
 
 fn ecr_dns_suffix(region: &str) -> &'static str {
-    if region.starts_with("cn-") {
-        "amazonaws.com.cn"
-    } else if region.starts_with("us-gov-") {
-        "amazonaws.com"
-    } else if region.starts_with("us-iso-") {
-        "c2s.ic.gov"
-    } else if region.starts_with("us-isob-") {
-        "sc2s.sgov.gov"
-    } else if region.starts_with("eu-isoe-") {
-        "cloud.adc-e.uk"
-    } else if region.starts_with("us-isof-") {
-        "csp.hci.ic.gov"
-    } else if region.starts_with("eusc-") {
-        "amazonaws.eu"
-    } else {
-        "amazonaws.com"
-    }
+    const SUFFIXES: [(&str, &str); 7] = [
+        ("cn-", "amazonaws.com.cn"),
+        ("us-gov-", "amazonaws.com"),
+        ("us-iso-", "c2s.ic.gov"),
+        ("us-isob-", "sc2s.sgov.gov"),
+        ("eu-isoe-", "cloud.adc-e.uk"),
+        ("us-isof-", "csp.hci.ic.gov"),
+        ("eusc-", "amazonaws.eu"),
+    ];
+    SUFFIXES
+        .into_iter()
+        .find_map(|(prefix, suffix)| region.starts_with(prefix).then_some(suffix))
+        .unwrap_or("amazonaws.com")
 }
 
 fn ecr_registry(account: &str, region: &str) -> String {
@@ -755,12 +1019,27 @@ fn ecr_registry(account: &str, region: &str) -> String {
 }
 
 fn ecr_registries(profile: &str, config: &ProfileConfig, options: &Options) -> Result<Vec<String>> {
-    let region = match config.region.as_deref() {
-        Some(region) => region,
-        None => return Ok(Vec::new()),
-    };
+    match config.region.as_deref() {
+        Some(region) => ecr_registries_for_region(profile, region, options),
+        None => Ok(Vec::new()),
+    }
+}
 
-    let configured = if options.registries.is_empty() {
+fn ecr_registries_for_region(
+    profile: &str,
+    region: &str,
+    options: &Options,
+) -> Result<Vec<String>> {
+    let configured = configured_ecr_registries(options);
+    if configured.is_empty() {
+        discover_account_registry(profile, region, options)
+    } else {
+        Ok(normalize_registries(configured, region))
+    }
+}
+
+fn configured_ecr_registries(options: &Options) -> Vec<String> {
+    if options.registries.is_empty() {
         env::var("AWSWAP_ECR_REGISTRIES")
             .ok()
             .map(|raw| {
@@ -773,20 +1052,30 @@ fn ecr_registries(profile: &str, config: &ProfileConfig, options: &Options) -> R
             .unwrap_or_default()
     } else {
         options.registries.clone()
-    };
-    if !configured.is_empty() {
-        let mut registries = BTreeSet::new();
-        for item in configured {
-            let host = if item.chars().all(|character| character.is_ascii_digit()) {
-                ecr_registry(&item, region)
-            } else {
-                normalize_registry(&item)
-            };
-            registries.insert(host);
-        }
-        return Ok(registries.into_iter().collect());
     }
+}
 
+fn normalize_registries(configured: Vec<String>, region: &str) -> Vec<String> {
+    let mut registries = BTreeSet::new();
+    for item in configured {
+        registries.insert(normalize_registry_item(&item, region));
+    }
+    registries.into_iter().collect()
+}
+
+fn normalize_registry_item(item: &str, region: &str) -> String {
+    if item.chars().all(|character| character.is_ascii_digit()) {
+        ecr_registry(item, region)
+    } else {
+        normalize_registry(item)
+    }
+}
+
+fn discover_account_registry(
+    profile: &str,
+    region: &str,
+    options: &Options,
+) -> Result<Vec<String>> {
     let output = aws_output(
         profile,
         &[
@@ -799,19 +1088,32 @@ fn ecr_registries(profile: &str, config: &ProfileConfig, options: &Options) -> R
         ],
         options,
     )?;
+    account_registry_from_output(profile, region, options, &output)
+}
+
+fn account_registry_from_output(
+    profile: &str,
+    region: &str,
+    options: &Options,
+    output: &Output,
+) -> Result<Vec<String>> {
     if !output.status.success() {
         return Err(aws_command_error(
             "could not determine the AWS account",
             profile,
-            &output,
+            output,
             options.verbose,
         ));
     }
     let account = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    registry_for_account(&account, region)
+}
+
+fn registry_for_account(account: &str, region: &str) -> Result<Vec<String>> {
     if account.is_empty() || account == "None" {
         return Err("AWS returned no account ID; skipped ECR login".into());
     }
-    Ok(vec![ecr_registry(&account, region)])
+    Ok(vec![ecr_registry(account, region)])
 }
 
 fn registry_login(
@@ -820,13 +1122,23 @@ fn registry_login(
     registry: &str,
     password: &[u8],
 ) -> Result<RegistryLoginMethod> {
-    if client == RegistryClient::Docker
-        && docker_credential_helper(registry)?.as_deref() == Some("ecr-login")
-    {
+    if uses_ecr_credential_helper(client, registry)? {
         validate_ecr_credential_helper(profile, registry)?;
         return Ok(RegistryLoginMethod::EcrCredentialHelper);
     }
+    password_registry_login(client, registry, password)
+}
 
+fn uses_ecr_credential_helper(client: RegistryClient, registry: &str) -> Result<bool> {
+    Ok(client == RegistryClient::Docker
+        && docker_credential_helper(registry)?.as_deref() == Some("ecr-login"))
+}
+
+fn password_registry_login(
+    client: RegistryClient,
+    registry: &str,
+    password: &[u8],
+) -> Result<RegistryLoginMethod> {
     let command = client.command();
     let mut child = Command::new(command)
         .args(client.login_args(registry))
@@ -835,12 +1147,28 @@ fn registry_login(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("could not start {command}: {error}"))?;
+    send_registry_password(&mut child, command, password)?;
+    finish_registry_login(child, command, registry)
+}
+
+fn send_registry_password(
+    child: &mut std::process::Child,
+    command: &str,
+    password: &[u8],
+) -> Result<()> {
     child
         .stdin
         .take()
         .ok_or_else(|| format!("could not open {command} input"))?
         .write_all(password)
-        .map_err(|error| format!("could not send credentials to {command}: {error}"))?;
+        .map_err(|error| format!("could not send credentials to {command}: {error}"))
+}
+
+fn finish_registry_login(
+    child: std::process::Child,
+    command: &str,
+    registry: &str,
+) -> Result<RegistryLoginMethod> {
     let output = child
         .wait_with_output()
         .map_err(|error| format!("could not wait for {command}: {error}"))?;
@@ -898,6 +1226,15 @@ fn validate_ecr_credential_helper(profile: &str, registry: &str) -> Result<()> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("could not start {command}: {error}"))?;
+    send_registry_to_helper(&mut child, command, registry)?;
+    finish_credential_helper(child, command, registry)
+}
+
+fn send_registry_to_helper(
+    child: &mut std::process::Child,
+    command: &str,
+    registry: &str,
+) -> Result<()> {
     writeln!(
         child
             .stdin
@@ -905,7 +1242,14 @@ fn validate_ecr_credential_helper(profile: &str, registry: &str) -> Result<()> {
             .ok_or_else(|| format!("could not open {command} input"))?,
         "{registry}"
     )
-    .map_err(|error| format!("could not send registry to {command}: {error}"))?;
+    .map_err(|error| format!("could not send registry to {command}: {error}"))
+}
+
+fn finish_credential_helper(
+    child: std::process::Child,
+    command: &str,
+    registry: &str,
+) -> Result<()> {
     let output = child
         .wait_with_output()
         .map_err(|error| format!("could not wait for {command}: {error}"))?;
@@ -921,25 +1265,38 @@ fn validate_ecr_credential_helper(profile: &str, registry: &str) -> Result<()> {
 
 fn discover_profiles() -> Result<Vec<String>> {
     let mut profiles = BTreeSet::new();
-    if let Ok(output) = Command::new("aws")
+    profiles.extend(discover_profiles_from_aws());
+    profiles.extend(discover_profiles_from_files());
+    Ok(profiles.into_iter().collect())
+}
+
+fn discover_profiles_from_aws() -> BTreeSet<String> {
+    Command::new("aws")
         .args(["configure", "list-profiles"])
         .output()
-        && output.status.success()
-    {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let profile = line.trim();
-            if !profile.is_empty() {
-                profiles.insert(profile.to_string());
-            }
-        }
-    }
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| parse_profile_list(&output.stdout))
+        .unwrap_or_default()
+}
 
+fn parse_profile_list(output: &[u8]) -> BTreeSet<String> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .filter(|profile| !profile.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn discover_profiles_from_files() -> BTreeSet<String> {
+    let mut profiles = BTreeSet::new();
     for path in [aws_config_path(), aws_credentials_path()] {
         if let Ok(contents) = fs::read_to_string(path) {
             profiles.extend(parse_profiles(&contents));
         }
     }
-    Ok(profiles.into_iter().collect())
+    profiles
 }
 
 fn parse_profiles(contents: &str) -> BTreeSet<String> {
@@ -976,11 +1333,7 @@ fn read_profile_config(profile: &str) -> Result<ProfileConfig> {
 }
 
 fn parse_profile_config(contents: &str, profile: &str) -> ProfileConfig {
-    let target = if profile == "default" {
-        "default".to_string()
-    } else {
-        format!("profile {profile}")
-    };
+    let target = profile_section(profile);
     let mut current_section = String::new();
     let mut config = ProfileConfig::default();
 
@@ -988,41 +1341,80 @@ fn parse_profile_config(contents: &str, profile: &str) -> ProfileConfig {
         let line = raw_line.trim();
         if let Some(section) = parse_section(line) {
             current_section = section.to_string();
-            continue;
-        }
-        if current_section != target || line.starts_with('#') || line.starts_with(';') {
-            continue;
-        }
-        let Some((raw_key, raw_value)) = line.split_once('=') else {
-            continue;
-        };
-        let key = raw_key.trim();
-        let value = raw_value.trim();
-        match key {
-            "region" if !value.is_empty() => config.region = Some(value.to_string()),
-            "sso_account_id" if !value.is_empty() => config.account_id = Some(value.to_string()),
-            "role_name" if !value.is_empty() => config.role_name = Some(value.to_string()),
-            "role_arn" if !value.is_empty() => {
-                config.account_id = value
-                    .split(':')
-                    .nth(4)
-                    .filter(|part| !part.is_empty())
-                    .map(str::to_string);
-                config.role_name = value
-                    .rsplit('/')
-                    .next()
-                    .filter(|part| !part.is_empty())
-                    .map(str::to_string);
-            }
-            "source_profile" if !value.is_empty() => {
-                config.source_profile = Some(value.to_string())
-            }
-            "sso_session" | "sso_start_url" if !value.is_empty() => config.is_sso = true,
-            "login_session" if !value.is_empty() => config.is_login = true,
-            _ => {}
+        } else if current_section == target {
+            apply_profile_line(&mut config, line);
         }
     }
     config
+}
+
+fn profile_section(profile: &str) -> String {
+    if profile == "default" {
+        "default".to_string()
+    } else {
+        format!("profile {profile}")
+    }
+}
+
+fn apply_profile_line(config: &mut ProfileConfig, line: &str) {
+    let Some((raw_key, raw_value)) = line.split_once('=') else {
+        return;
+    };
+    let value = raw_value.trim();
+    if value.is_empty() {
+        return;
+    }
+    apply_profile_property(config, raw_key.trim(), value);
+}
+
+fn apply_profile_property(config: &mut ProfileConfig, key: &str, value: &str) {
+    if apply_basic_profile_property(config, key, value) {
+        return;
+    }
+    if apply_role_profile_property(config, key, value) {
+        return;
+    }
+    apply_auth_profile_property(config, key);
+}
+
+fn apply_basic_profile_property(config: &mut ProfileConfig, key: &str, value: &str) -> bool {
+    match key {
+        "region" => config.region = Some(value.to_string()),
+        "sso_account_id" => config.account_id = Some(value.to_string()),
+        "source_profile" => config.source_profile = Some(value.to_string()),
+        _ => return false,
+    }
+    true
+}
+
+fn apply_role_profile_property(config: &mut ProfileConfig, key: &str, value: &str) -> bool {
+    match key {
+        "role_name" => config.role_name = Some(value.to_string()),
+        "role_arn" => apply_role_arn(config, value),
+        _ => return false,
+    }
+    true
+}
+
+fn apply_role_arn(config: &mut ProfileConfig, value: &str) {
+    config.account_id = value
+        .split(':')
+        .nth(4)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string);
+    config.role_name = value
+        .rsplit('/')
+        .next()
+        .filter(|part| !part.is_empty())
+        .map(str::to_string);
+}
+
+fn apply_auth_profile_property(config: &mut ProfileConfig, key: &str) {
+    match key {
+        "sso_session" | "sso_start_url" => config.is_sso = true,
+        "login_session" => config.is_login = true,
+        _ => {}
+    }
 }
 
 fn parse_section(line: &str) -> Option<&str> {
@@ -1108,65 +1500,97 @@ fn command_error(context: &str, output: &Output) -> String {
 
 fn classify_aws_error(context: &str, profile: &str, detail: &str) -> Option<String> {
     let normalized = detail.to_ascii_lowercase();
-    if normalized.contains("expiredtoken")
-        || normalized.contains("token has expired")
-        || normalized.contains("sso session") && normalized.contains("expired")
-        || normalized.contains("unauthorizedssotoken")
-    {
-        Some(format!(
-            "{context}: credentials for '{profile}' expired; run `awswap login {profile}`"
-        ))
-    } else if normalized.contains("unable to locate credentials")
-        || normalized.contains("invalidclienttokenid")
-        || normalized.contains("unrecognizedclientexception")
-        || normalized.contains("credentials could not be loaded")
-    {
-        Some(format!(
+    [
+        expired_aws_error(context, profile, &normalized),
+        unavailable_aws_error(context, profile, &normalized),
+        denied_aws_error(context, profile, &normalized),
+        network_aws_error(context, &normalized),
+        region_aws_error(context, profile, &normalized),
+        missing_profile_aws_error(context, profile, &normalized),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+}
+
+fn contains_any(value: &str, patterns: &[&str]) -> bool {
+    patterns.iter().any(|pattern| value.contains(pattern))
+}
+
+fn expired_aws_error(context: &str, profile: &str, detail: &str) -> Option<String> {
+    let expired = contains_any(
+        detail,
+        &["expiredtoken", "token has expired", "unauthorizedssotoken"],
+    ) || detail.contains("sso session") && detail.contains("expired");
+    expired.then(|| {
+        format!("{context}: credentials for '{profile}' expired; run `awswap login {profile}`")
+    })
+}
+
+fn unavailable_aws_error(context: &str, profile: &str, detail: &str) -> Option<String> {
+    contains_any(
+        detail,
+        &[
+            "unable to locate credentials",
+            "invalidclienttokenid",
+            "unrecognizedclientexception",
+            "credentials could not be loaded",
+        ],
+    )
+    .then(|| {
+        format!(
             "{context}: credentials for '{profile}' are unavailable; run `awswap login {profile}`"
-        ))
-    } else if normalized.contains("accessdenied")
-        || normalized.contains("access denied")
-        || normalized.contains("not authorized")
-    {
-        Some(format!(
-            "{context}: access denied for '{profile}'; verify its IAM permissions"
-        ))
-    } else if normalized.contains("could not connect")
-        || normalized.contains("endpoint url")
-        || normalized.contains("timed out")
-        || normalized.contains("name or service not known")
-        || normalized.contains("temporary failure in name resolution")
-    {
-        Some(format!(
-            "{context}: could not reach AWS; check the network, proxy, and configured region"
-        ))
-    } else if normalized.contains("you must specify a region")
-        || normalized.contains("invalid region")
-    {
-        Some(format!(
+        )
+    })
+}
+
+fn denied_aws_error(context: &str, profile: &str, detail: &str) -> Option<String> {
+    contains_any(detail, &["accessdenied", "access denied", "not authorized"])
+        .then(|| format!("{context}: access denied for '{profile}'; verify its IAM permissions"))
+}
+
+fn network_aws_error(context: &str, detail: &str) -> Option<String> {
+    contains_any(
+        detail,
+        &[
+            "could not connect",
+            "endpoint url",
+            "timed out",
+            "name or service not known",
+            "temporary failure in name resolution",
+        ],
+    )
+    .then(|| {
+        format!("{context}: could not reach AWS; check the network, proxy, and configured region")
+    })
+}
+
+fn region_aws_error(context: &str, profile: &str, detail: &str) -> Option<String> {
+    contains_any(detail, &["you must specify a region", "invalid region"]).then(|| {
+        format!(
             "{context}: profile '{profile}' has no valid region; configure one with `aws configure set region <region> --profile {profile}`"
-        ))
-    } else if normalized.contains("config profile") && normalized.contains("could not be found") {
-        Some(format!(
-            "{context}: profile '{profile}' is missing from the AWS configuration"
-        ))
-    } else {
-        None
-    }
+        )
+    })
+}
+
+fn missing_profile_aws_error(context: &str, profile: &str, detail: &str) -> Option<String> {
+    (detail.contains("config profile") && detail.contains("could not be found"))
+        .then(|| format!("{context}: profile '{profile}' is missing from the AWS configuration"))
 }
 
 fn aws_command_error(context: &str, profile: &str, output: &Output, verbose: bool) -> String {
     let detail = output_detail(output);
-    if let Some(classified) = classify_aws_error(context, profile, &detail) {
-        if verbose && !detail.is_empty() {
-            format!("{classified}\nAWS CLI: {detail}")
-        } else {
-            classified
-        }
-    } else if detail.is_empty() {
-        format!("{context} ({})", output.status)
+    match classify_aws_error(context, profile, &detail) {
+        Some(classified) => classified_aws_error(classified, &detail, verbose),
+        None => command_error(context, output),
+    }
+}
+
+fn classified_aws_error(classified: String, detail: &str, verbose: bool) -> String {
+    if verbose && !detail.is_empty() {
+        format!("{classified}\nAWS CLI: {detail}")
     } else {
-        format!("{context}: {detail}")
+        classified
     }
 }
 
@@ -1191,14 +1615,26 @@ fn effective_profile(state: &State) -> Option<String> {
 }
 
 fn state_dir() -> Result<PathBuf> {
-    if let Some(path) = env::var_os("AWSWAP_HOME") {
-        return Ok(PathBuf::from(path));
-    }
-    if let Some(path) = env::var_os("XDG_STATE_HOME") {
-        return Ok(PathBuf::from(path).join("awswap"));
-    }
-    home_dir()
-        .map(|home| home.join(".local/state/awswap"))
+    state_dir_from(
+        env::var_os("AWSWAP_HOME"),
+        env::var_os("XDG_STATE_HOME"),
+        home_dir(),
+    )
+}
+
+fn state_dir_from(
+    awswap_home: Option<std::ffi::OsString>,
+    xdg_state_home: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Result<PathBuf> {
+    awswap_home
+        .map(PathBuf::from)
+        .or_else(|| {
+            xdg_state_home
+                .map(PathBuf::from)
+                .map(|path| path.join("awswap"))
+        })
+        .or_else(|| home.map(|path| path.join(".local/state/awswap")))
         .ok_or_else(|| "could not determine the state directory; set AWSWAP_HOME".into())
 }
 
@@ -1208,37 +1644,54 @@ fn state_path() -> Result<PathBuf> {
 
 fn load_state() -> Result<State> {
     let path = state_path()?;
-    let contents = match fs::read_to_string(&path) {
+    read_state(&path).map(|contents| parse_state(&contents))
+}
+
+fn read_state(path: &Path) -> Result<String> {
+    let contents = match fs::read_to_string(path) {
         Ok(contents) => contents,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(State::default()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(format!("could not read {}: {error}", path.display())),
     };
-    Ok(parse_state(&contents))
+    Ok(contents)
 }
 
 fn parse_state(contents: &str) -> State {
     let mut state = State::default();
     for line in contents.lines() {
-        if let Some(value) = line
-            .strip_prefix("current=")
-            .filter(|value| !value.is_empty())
-        {
-            state.current = Some(value.to_string());
-        } else if let Some(value) = line
-            .strip_prefix("previous=")
-            .filter(|value| !value.is_empty())
-        {
-            state.previous = Some(value.to_string());
-        } else if let Some(value) = line
-            .strip_prefix("recent=")
-            .filter(|value| !value.is_empty())
-            && !state.recent.iter().any(|recent| recent == value)
-        {
-            state.recent.push(value.to_string());
-        }
+        apply_state_line(&mut state, line);
     }
     state.recent.truncate(8);
     state
+}
+
+fn apply_state_line(state: &mut State, line: &str) {
+    match state_entry(line) {
+        Some(("current", value)) => state.current = Some(value.to_string()),
+        Some(("previous", value)) => state.previous = Some(value.to_string()),
+        Some(("recent", value)) => add_recent(state, value),
+        _ => {}
+    }
+}
+
+fn state_entry(line: &str) -> Option<(&'static str, &str)> {
+    [
+        ("current", "current="),
+        ("previous", "previous="),
+        ("recent", "recent="),
+    ]
+    .into_iter()
+    .find_map(|(name, prefix)| {
+        line.strip_prefix(prefix)
+            .filter(|value| !value.is_empty())
+            .map(|value| (name, value))
+    })
+}
+
+fn add_recent(state: &mut State, value: &str) {
+    if !state.recent.iter().any(|recent| recent == value) {
+        state.recent.push(value.to_string());
+    }
 }
 
 fn save_state(state: &State) -> Result<()> {
@@ -1326,221 +1779,338 @@ fn env_flag(name: &str) -> bool {
 
 fn status(requested: Option<&String>, options: &Options) -> Result<()> {
     require_command("aws")?;
+    let profile = resolve_status_profile(requested)?;
+    let report = build_status_report(profile, options)?;
+    print_status(&report, options);
+    Ok(())
+}
+
+fn resolve_status_profile(requested: Option<&String>) -> Result<String> {
     let profiles = discover_profiles()?;
     let state = load_state()?;
-    let profile = resolve_profile(requested, &profiles, &state)?;
+    resolve_profile(requested, &profiles, &state)
+}
+
+fn build_status_report(profile: String, options: &Options) -> Result<StatusReport> {
     let config = read_profile_config(&profile)?;
     let identity = validate_credentials(&profile, options)?;
-    let clients: Vec<&str> = [
+    Ok(StatusReport {
+        profile,
+        config,
+        identity,
+        clients: installed_client_names(),
+        shell_hook: shell_hook_active(),
+    })
+}
+
+fn installed_client_names() -> Vec<&'static str> {
+    [
         ("Docker", command_exists("docker")),
         ("Helm", command_exists("helm")),
     ]
     .into_iter()
     .filter_map(|(name, installed)| installed.then_some(name))
-    .collect();
+    .collect()
+}
+
+fn print_status(report: &StatusReport, options: &Options) {
     if options.json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "profile": profile,
-                "region": config.region,
-                "account": identity.account,
-                "arn": identity.arn,
-                "identity": identity.display_name(),
-                "credentials": "valid",
-                "shell_hook": shell_hook_active(),
-                "ecr_clients": clients,
-            })
-        );
+        print_status_json(report);
     } else if !options.quiet {
-        println!("{:<14} {}", "Profile", profile.green().bold());
-        println!(
-            "{:<14} {}",
-            "Region",
-            config.region.as_deref().unwrap_or("not configured")
-        );
-        println!("{:<14} {}", "Account", identity.account);
-        println!("{:<14} {}", "Identity", identity.display_name());
-        println!("{:<14} {}", "Credentials", "valid".green());
-        println!(
-            "{:<14} {}",
-            "Shell hook",
-            if shell_hook_active() {
-                "active"
-            } else {
-                "not installed"
-            }
-        );
-        println!(
-            "{:<14} {}",
-            "ECR clients",
-            if clients.is_empty() {
-                "none".into()
-            } else {
-                clients.join(", ")
-            }
-        );
+        print_status_text(report);
     }
-    Ok(())
+}
+
+fn print_status_json(report: &StatusReport) {
+    println!(
+        "{}",
+        serde_json::json!({
+            "profile": report.profile,
+            "region": report.config.region,
+            "account": report.identity.account,
+            "arn": report.identity.arn,
+            "identity": report.identity.display_name(),
+            "credentials": "valid",
+            "shell_hook": report.shell_hook,
+            "ecr_clients": report.clients,
+        })
+    );
+}
+
+fn print_status_text(report: &StatusReport) {
+    println!("{:<14} {}", "Profile", report.profile.green().bold());
+    println!(
+        "{:<14} {}",
+        "Region",
+        report.config.region.as_deref().unwrap_or("not configured")
+    );
+    println!("{:<14} {}", "Account", report.identity.account);
+    println!("{:<14} {}", "Identity", report.identity.display_name());
+    println!("{:<14} {}", "Credentials", "valid".green());
+    println!(
+        "{:<14} {}",
+        "Shell hook",
+        shell_hook_label(report.shell_hook)
+    );
+    println!(
+        "{:<14} {}",
+        "ECR clients",
+        client_names_label(&report.clients)
+    );
+}
+
+fn shell_hook_label(active: bool) -> &'static str {
+    if active { "active" } else { "not installed" }
+}
+
+fn client_names_label(clients: &[&str]) -> String {
+    if clients.is_empty() {
+        "none".into()
+    } else {
+        clients.join(", ")
+    }
+}
+
+struct DoctorContext {
+    profiles: Vec<String>,
+    profile: Option<String>,
+    config_path: PathBuf,
+    state_path: PathBuf,
+    docker: bool,
+    helm: bool,
+}
+
+#[derive(Default)]
+struct ProfileDiagnosis {
+    checks: Vec<DoctorCheck>,
+    identity: Option<Identity>,
+    config: Option<ProfileConfig>,
 }
 
 fn doctor(requested: Option<&String>, options: &Options) -> Result<()> {
-    let mut checks = Vec::new();
-    let aws_installed = command_exists("aws");
-    if aws_installed {
-        let version = Command::new("aws")
-            .arg("--version")
-            .output()
-            .ok()
-            .map(|output| {
-                let detail = output_detail(&output);
-                if detail.is_empty() {
-                    "installed".into()
-                } else {
-                    detail
-                }
-            })
-            .unwrap_or_else(|| "installed".into());
-        checks.push(DoctorCheck {
-            level: CheckLevel::Pass,
-            name: "AWS CLI".into(),
-            detail: version,
-        });
-    } else {
-        checks.push(DoctorCheck {
-            level: CheckLevel::Fail,
-            name: "AWS CLI".into(),
-            detail: "not found in PATH".into(),
-        });
-    }
+    let checks = doctor_checks(requested, options)?;
+    print_doctor_checks(&checks, options);
+    doctor_result(&checks)
+}
 
-    let config_path = aws_config_path();
-    checks.push(DoctorCheck {
-        level: if config_path.is_file() {
-            CheckLevel::Pass
-        } else {
-            CheckLevel::Warn
-        },
-        name: "AWS config".into(),
-        detail: config_path.display().to_string(),
-    });
+fn doctor_checks(requested: Option<&String>, options: &Options) -> Result<Vec<DoctorCheck>> {
+    let context = doctor_context(requested)?;
+    let diagnosis = diagnose_profile(context.profile.as_deref(), options)?;
+    Ok(assemble_doctor_checks(&context, diagnosis))
+}
 
+fn doctor_context(requested: Option<&String>) -> Result<DoctorContext> {
     let profiles = discover_profiles()?;
-    checks.push(DoctorCheck {
-        level: if profiles.is_empty() {
-            CheckLevel::Fail
-        } else {
-            CheckLevel::Pass
-        },
-        name: "Profiles".into(),
-        detail: format!("{} discovered", profiles.len()),
-    });
     let state = load_state()?;
-    let profile = resolve_profile(requested, &profiles, &state).ok();
-    checks.push(DoctorCheck {
-        level: if profile.is_some() {
-            CheckLevel::Pass
-        } else {
-            CheckLevel::Fail
-        },
-        name: "Active profile".into(),
-        detail: profile.clone().unwrap_or_else(|| "none selected".into()),
-    });
+    Ok(DoctorContext {
+        profile: resolve_profile(requested, &profiles, &state).ok(),
+        profiles,
+        config_path: aws_config_path(),
+        state_path: state_path()?,
+        docker: command_exists("docker"),
+        helm: command_exists("helm"),
+    })
+}
 
-    let mut diagnosed_identity = None;
-    let mut diagnosed_config = None;
-    if let Some(profile) = profile.as_deref() {
-        let config = read_profile_config(profile)?;
-        checks.push(DoctorCheck {
-            level: if config.region.is_some() {
-                CheckLevel::Pass
-            } else {
-                CheckLevel::Warn
+fn diagnose_profile(profile: Option<&str>, options: &Options) -> Result<ProfileDiagnosis> {
+    match profile {
+        Some(profile) => diagnose_named_profile(profile, options),
+        None => Ok(ProfileDiagnosis::default()),
+    }
+}
+
+fn diagnose_named_profile(profile: &str, options: &Options) -> Result<ProfileDiagnosis> {
+    let config = read_profile_config(profile)?;
+    let (credentials, identity) = credentials_check(profile, options);
+    Ok(ProfileDiagnosis {
+        checks: vec![region_check(&config), credentials],
+        identity,
+        config: Some(config),
+    })
+}
+
+fn credentials_check(profile: &str, options: &Options) -> (DoctorCheck, Option<Identity>) {
+    match validate_credentials(profile, options) {
+        Ok(identity) => (
+            DoctorCheck {
+                level: CheckLevel::Pass,
+                name: "Credentials".into(),
+                detail: format!("{} · {}", identity.account, identity.display_name()),
             },
-            name: "Region".into(),
-            detail: config
-                .clone()
-                .region
-                .unwrap_or_else(|| "not configured; ECR login will be skipped".into()),
-        });
-        match validate_credentials(profile, options) {
-            Ok(identity) => {
-                checks.push(DoctorCheck {
-                    level: CheckLevel::Pass,
-                    name: "Credentials".into(),
-                    detail: format!("{} · {}", identity.account, identity.display_name()),
-                });
-                diagnosed_identity = Some(identity);
-            }
-            Err(error) => checks.push(DoctorCheck {
+            Some(identity),
+        ),
+        Err(error) => (
+            DoctorCheck {
                 level: CheckLevel::Fail,
                 name: "Credentials".into(),
                 detail: error,
-            }),
-        }
-        diagnosed_config = Some(config);
+            },
+            None,
+        ),
     }
+}
 
-    checks.push(DoctorCheck {
-        level: if shell_hook_active() {
-            CheckLevel::Pass
-        } else {
-            CheckLevel::Warn
-        },
+fn assemble_doctor_checks(
+    context: &DoctorContext,
+    mut diagnosis: ProfileDiagnosis,
+) -> Vec<DoctorCheck> {
+    let mut checks = vec![
+        aws_cli_check(),
+        aws_config_check(&context.config_path),
+        profiles_check(&context.profiles),
+        active_profile_check(context.profile.as_deref()),
+    ];
+    checks.append(&mut diagnosis.checks);
+    checks.extend([
+        shell_hook_check(),
+        state_check(&context.state_path),
+        ecr_clients_check(context.docker, context.helm),
+    ]);
+    checks.extend(docker_helper_check(context, &diagnosis));
+    checks.push(environment_check());
+    checks
+}
+
+fn aws_cli_check() -> DoctorCheck {
+    if command_exists("aws") {
+        DoctorCheck {
+            level: CheckLevel::Pass,
+            name: "AWS CLI".into(),
+            detail: aws_cli_version().unwrap_or_else(|| "installed".into()),
+        }
+    } else {
+        DoctorCheck {
+            level: CheckLevel::Fail,
+            name: "AWS CLI".into(),
+            detail: "not found in PATH".into(),
+        }
+    }
+}
+
+fn aws_cli_version() -> Option<String> {
+    Command::new("aws")
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|output| output_detail(&output))
+        .filter(|detail| !detail.is_empty())
+}
+
+fn aws_config_check(path: &Path) -> DoctorCheck {
+    DoctorCheck {
+        level: pass_or_warn(path.is_file()),
+        name: "AWS config".into(),
+        detail: path.display().to_string(),
+    }
+}
+
+fn profiles_check(profiles: &[String]) -> DoctorCheck {
+    DoctorCheck {
+        level: pass_or_fail(!profiles.is_empty()),
+        name: "Profiles".into(),
+        detail: format!("{} discovered", profiles.len()),
+    }
+}
+
+fn active_profile_check(profile: Option<&str>) -> DoctorCheck {
+    DoctorCheck {
+        level: pass_or_fail(profile.is_some()),
+        name: "Active profile".into(),
+        detail: profile.unwrap_or("none selected").to_string(),
+    }
+}
+
+fn region_check(config: &ProfileConfig) -> DoctorCheck {
+    DoctorCheck {
+        level: pass_or_warn(config.region.is_some()),
+        name: "Region".into(),
+        detail: config
+            .region
+            .clone()
+            .unwrap_or_else(|| "not configured; ECR login will be skipped".into()),
+    }
+}
+
+fn shell_hook_check() -> DoctorCheck {
+    let active = shell_hook_active();
+    DoctorCheck {
+        level: pass_or_warn(active),
         name: "Shell hook".into(),
-        detail: if shell_hook_active() {
-            "active".into()
-        } else {
-            format!("not active; run {}", shell_setup_hint())
-        },
-    });
-    checks.push(DoctorCheck {
+        detail: shell_hook_detail(active),
+    }
+}
+
+fn shell_hook_detail(active: bool) -> String {
+    if active {
+        "active".into()
+    } else {
+        format!("not active; run {}", shell_setup_hint())
+    }
+}
+
+fn state_check(path: &Path) -> DoctorCheck {
+    DoctorCheck {
         level: CheckLevel::Pass,
         name: "State".into(),
-        detail: state_path()?.display().to_string(),
-    });
-
-    let docker = command_exists("docker");
-    let helm = command_exists("helm");
-    checks.push(DoctorCheck {
-        level: if docker || helm {
-            CheckLevel::Pass
-        } else {
-            CheckLevel::Warn
-        },
-        name: "ECR clients".into(),
-        detail: match (docker, helm) {
-            (true, true) => "Docker, Helm".into(),
-            (true, false) => "Docker".into(),
-            (false, true) => "Helm".into(),
-            (false, false) => "Docker and Helm not found; ECR login is optional".into(),
-        },
-    });
-    if docker
-        && let (Some(identity), Some(config)) = (&diagnosed_identity, &diagnosed_config)
-        && let Some(region) = config.region.as_deref()
-    {
-        let registry = ecr_registry(&identity.account, region);
-        match docker_credential_helper(&registry) {
-            Ok(Some(helper)) => checks.push(DoctorCheck {
-                level: CheckLevel::Pass,
-                name: "Docker helper".into(),
-                detail: format!("{helper} for {registry}"),
-            }),
-            Ok(None) => checks.push(DoctorCheck {
-                level: CheckLevel::Pass,
-                name: "Docker helper".into(),
-                detail: "not configured; awswap will use docker login".into(),
-            }),
-            Err(error) => checks.push(DoctorCheck {
-                level: CheckLevel::Warn,
-                name: "Docker helper".into(),
-                detail: error,
-            }),
-        }
+        detail: path.display().to_string(),
     }
+}
 
-    let static_overrides: Vec<&str> = [
+fn ecr_clients_check(docker: bool, helm: bool) -> DoctorCheck {
+    DoctorCheck {
+        level: pass_or_warn(docker || helm),
+        name: "ECR clients".into(),
+        detail: ecr_clients_detail(docker, helm).into(),
+    }
+}
+
+fn ecr_clients_detail(docker: bool, helm: bool) -> &'static str {
+    const DETAILS: [&str; 4] = [
+        "Docker and Helm not found; ECR login is optional",
+        "Helm",
+        "Docker",
+        "Docker, Helm",
+    ];
+    DETAILS[usize::from(docker) * 2 + usize::from(helm)]
+}
+
+fn docker_helper_check(
+    context: &DoctorContext,
+    diagnosis: &ProfileDiagnosis,
+) -> Option<DoctorCheck> {
+    context.docker.then_some(())?;
+    let identity = diagnosis.identity.as_ref()?;
+    let config = diagnosis.config.as_ref()?;
+    let region = config.region.as_deref()?;
+    let registry = ecr_registry(&identity.account, region);
+    Some(docker_helper_result(
+        &registry,
+        docker_credential_helper(&registry),
+    ))
+}
+
+fn docker_helper_result(registry: &str, result: Result<Option<String>>) -> DoctorCheck {
+    match result {
+        Ok(Some(helper)) => DoctorCheck {
+            level: CheckLevel::Pass,
+            name: "Docker helper".into(),
+            detail: format!("{helper} for {registry}"),
+        },
+        Ok(None) => DoctorCheck {
+            level: CheckLevel::Pass,
+            name: "Docker helper".into(),
+            detail: "not configured; awswap will use docker login".into(),
+        },
+        Err(error) => DoctorCheck {
+            level: CheckLevel::Warn,
+            name: "Docker helper".into(),
+            detail: error,
+        },
+    }
+}
+
+fn environment_check() -> DoctorCheck {
+    let overrides: Vec<&str> = [
         "AWS_ACCESS_KEY_ID",
         "AWS_SECRET_ACCESS_KEY",
         "AWS_SESSION_TOKEN",
@@ -1549,40 +2119,90 @@ fn doctor(requested: Option<&String>, options: &Options) -> Result<()> {
     .into_iter()
     .filter(|name| env::var_os(name).is_some())
     .collect();
-    checks.push(DoctorCheck {
-        level: if static_overrides.is_empty() {
-            CheckLevel::Pass
-        } else {
-            CheckLevel::Warn
-        },
+    DoctorCheck {
+        level: pass_or_warn(overrides.is_empty()),
         name: "Environment".into(),
-        detail: if static_overrides.is_empty() {
-            "no static credential overrides".into()
-        } else {
-            format!(
-                "{} override profiles; the shell hook clears them",
-                static_overrides.join(", ")
-            )
-        },
-    });
-
-    if options.json {
-        let values: Vec<_> = checks.iter().map(|check| serde_json::json!({
-            "status": match check.level { CheckLevel::Pass => "pass", CheckLevel::Warn => "warn", CheckLevel::Fail => "fail" },
-            "name": check.name,
-            "detail": check.detail,
-        })).collect();
-        println!("{}", serde_json::Value::Array(values));
-    } else if !options.quiet {
-        for check in &checks {
-            let symbol = match check.level {
-                CheckLevel::Pass => "✓".green().to_string(),
-                CheckLevel::Warn => "!".yellow().to_string(),
-                CheckLevel::Fail => "✗".red().to_string(),
-            };
-            println!("{symbol} {:<16} {}", check.name, check.detail);
-        }
+        detail: environment_detail(&overrides),
     }
+}
+
+fn environment_detail(overrides: &[&str]) -> String {
+    if overrides.is_empty() {
+        "no static credential overrides".into()
+    } else {
+        format!(
+            "{} override profiles; the shell hook clears them",
+            overrides.join(", ")
+        )
+    }
+}
+
+fn pass_or_warn(passed: bool) -> CheckLevel {
+    if passed {
+        CheckLevel::Pass
+    } else {
+        CheckLevel::Warn
+    }
+}
+
+fn pass_or_fail(passed: bool) -> CheckLevel {
+    if passed {
+        CheckLevel::Pass
+    } else {
+        CheckLevel::Fail
+    }
+}
+
+fn print_doctor_checks(checks: &[DoctorCheck], options: &Options) {
+    if options.json {
+        print_doctor_json(checks);
+    } else if !options.quiet {
+        print_doctor_text(checks);
+    }
+}
+
+fn print_doctor_json(checks: &[DoctorCheck]) {
+    let values: Vec<_> = checks
+        .iter()
+        .map(|check| {
+            serde_json::json!({
+                "status": check_level_name(check.level),
+                "name": check.name,
+                "detail": check.detail,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::Value::Array(values));
+}
+
+fn print_doctor_text(checks: &[DoctorCheck]) {
+    for check in checks {
+        println!(
+            "{} {:<16} {}",
+            check_level_symbol(check.level),
+            check.name,
+            check.detail
+        );
+    }
+}
+
+fn check_level_name(level: CheckLevel) -> &'static str {
+    match level {
+        CheckLevel::Pass => "pass",
+        CheckLevel::Warn => "warn",
+        CheckLevel::Fail => "fail",
+    }
+}
+
+fn check_level_symbol(level: CheckLevel) -> String {
+    match level {
+        CheckLevel::Pass => "✓".green().to_string(),
+        CheckLevel::Warn => "!".yellow().to_string(),
+        CheckLevel::Fail => "✗".red().to_string(),
+    }
+}
+
+fn doctor_result(checks: &[DoctorCheck]) -> Result<()> {
     let failures = checks
         .iter()
         .filter(|check| check.level == CheckLevel::Fail)
@@ -1658,6 +2278,10 @@ fn shell_setup_hint() -> String {
         .and_then(|path| Path::new(&path).file_name()?.to_str().map(str::to_string))
         .filter(|shell| matches!(shell.as_str(), "bash" | "zsh" | "fish"))
         .unwrap_or_else(|| "zsh".to_string());
+    shell_setup_command(&shell)
+}
+
+fn shell_setup_command(shell: &str) -> String {
     if shell == "fish" {
         "awswap init fish | source".into()
     } else {
@@ -1728,6 +2352,9 @@ end
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn parse_args(values: &[&str]) -> clap::error::Result<Cli> {
         Cli::try_parse_from(std::iter::once("awswap").chain(values.iter().copied()))
@@ -1989,5 +2616,427 @@ mod tests {
                 .unwrap()
                 .contains("check the network")
         );
+    }
+
+    #[test]
+    fn covers_pure_output_and_error_helpers() {
+        configure_color();
+        assert_eq!(exit_code(Ok(())), ExitCode::SUCCESS);
+        assert_eq!(exit_code(Err(String::new())), ExitCode::SUCCESS);
+        assert_eq!(exit_code(Err("failed".into())), ExitCode::FAILURE);
+
+        assert_eq!(RegistryClient::Docker.command(), "docker");
+        assert_eq!(RegistryClient::Helm.command(), "helm");
+        assert_eq!(RegistryClient::Docker.label(), "Docker");
+        assert_eq!(RegistryClient::Helm.label(), "Helm");
+
+        let configs = [
+            (
+                ProfileConfig {
+                    is_sso: true,
+                    ..ProfileConfig::default()
+                },
+                "SSO",
+            ),
+            (
+                ProfileConfig {
+                    is_login: true,
+                    ..ProfileConfig::default()
+                },
+                "login",
+            ),
+            (
+                ProfileConfig {
+                    role_name: Some("Admin".into()),
+                    ..ProfileConfig::default()
+                },
+                "role",
+            ),
+            (ProfileConfig::default(), "credentials"),
+        ];
+        for (config, expected) in configs {
+            assert_eq!(config.auth_label(), expected);
+        }
+
+        let options = Options {
+            verbose: true,
+            ..Options::default()
+        };
+        options.progress("working");
+        options.trace("aws", &["--version"]);
+
+        for shell in [Shell::Bash, Shell::Zsh, Shell::Fish] {
+            print_completions(shell);
+            print_shell_hook(shell);
+        }
+        assert_eq!(shell_setup_command("fish"), "awswap init fish | source");
+        assert!(shell_setup_command("zsh").contains("eval"));
+        assert_eq!(shell_hook_label(true), "active");
+        assert_eq!(shell_hook_label(false), "not installed");
+        assert_eq!(client_names_label(&[]), "none");
+        assert_eq!(client_names_label(&["Docker", "Helm"]), "Docker, Helm");
+
+        assert_eq!(selection_error(InquireError::OperationCanceled), "");
+        assert_eq!(selection_error(InquireError::OperationInterrupted), "");
+        assert!(selection_error(InquireError::NotTTY).contains("could not read"));
+
+        assert!(parse_registry(" ").is_err());
+        assert_eq!(parse_registry(" host ").unwrap(), "host");
+        assert!(parse_identity(b"not json").is_err());
+        assert_eq!(parse_section(" [profile dev] "), Some("profile dev"));
+        assert_eq!(parse_section("profile dev"), None);
+        assert!(ensure_profile_exists("dev", &["dev".into()]).is_ok());
+        assert!(
+            ensure_profile_exists("de", &["dev".into()])
+                .unwrap_err()
+                .contains("did you mean")
+        );
+        assert!(ensure_profile_exists("other", &["dev".into()]).is_err());
+
+        for (detail, expected) in [
+            ("Unable to locate credentials", "unavailable"),
+            ("Invalid region", "no valid region"),
+            ("Config profile could not be found", "missing"),
+        ] {
+            assert!(
+                classify_aws_error("check", "dev", detail)
+                    .unwrap()
+                    .contains(expected)
+            );
+        }
+        assert_eq!(classify_aws_error("check", "dev", "other"), None);
+
+        assert_eq!(
+            state_dir_from(Some("/state".into()), None, None).unwrap(),
+            PathBuf::from("/state")
+        );
+        assert_eq!(
+            state_dir_from(None, Some("/xdg".into()), None).unwrap(),
+            PathBuf::from("/xdg/awswap")
+        );
+        assert_eq!(
+            state_dir_from(None, None, Some(PathBuf::from("/home"))).unwrap(),
+            PathBuf::from("/home/.local/state/awswap")
+        );
+        assert!(state_dir_from(None, None, None).is_err());
+
+        assert!(registry_for_account("", "us-east-1").is_err());
+        assert!(registry_for_account("None", "us-east-1").is_err());
+        assert_eq!(
+            registry_for_account("123", "us-east-1").unwrap(),
+            ["123.dkr.ecr.us-east-1.amazonaws.com"]
+        );
+
+        for result in [
+            Ok(Some("ecr-login".into())),
+            Ok(None),
+            Err("bad config".into()),
+        ] {
+            let check = docker_helper_result("registry.example.com", result);
+            assert_eq!(check.name, "Docker helper");
+        }
+    }
+
+    #[test]
+    fn covers_report_rendering_helpers() {
+        let choices = [
+            ProfileChoice {
+                name: "current".into(),
+                marker: "● ",
+                region: "us-east-1".into(),
+                auth: "SSO",
+                account: "1".into(),
+            },
+            ProfileChoice {
+                name: "previous".into(),
+                marker: "↩ ",
+                region: "us-west-2".into(),
+                auth: "role",
+                account: "2".into(),
+            },
+            ProfileChoice {
+                name: "other".into(),
+                marker: "  ",
+                region: "—".into(),
+                auth: "credentials",
+                account: String::new(),
+            },
+        ];
+        for choice in &choices {
+            print_profile_choice(choice);
+        }
+
+        let checks = [
+            DoctorCheck {
+                level: CheckLevel::Pass,
+                name: "pass".into(),
+                detail: "ok".into(),
+            },
+            DoctorCheck {
+                level: CheckLevel::Warn,
+                name: "warn".into(),
+                detail: "check".into(),
+            },
+            DoctorCheck {
+                level: CheckLevel::Fail,
+                name: "fail".into(),
+                detail: "bad".into(),
+            },
+        ];
+        print_doctor_text(&checks);
+        assert_eq!(check_level_name(CheckLevel::Pass), "pass");
+        assert_eq!(check_level_name(CheckLevel::Warn), "warn");
+        assert_eq!(check_level_name(CheckLevel::Fail), "fail");
+        assert!(doctor_result(&checks).is_err());
+
+        assert_eq!(pass_or_warn(true), CheckLevel::Pass);
+        assert_eq!(pass_or_warn(false), CheckLevel::Warn);
+        assert_eq!(pass_or_fail(true), CheckLevel::Pass);
+        assert_eq!(pass_or_fail(false), CheckLevel::Fail);
+        assert_eq!(
+            ecr_clients_detail(false, false),
+            "Docker and Helm not found; ECR login is optional"
+        );
+        assert_eq!(ecr_clients_detail(false, true), "Helm");
+        assert_eq!(ecr_clients_detail(true, false), "Docker");
+        assert_eq!(ecr_clients_detail(true, true), "Docker, Helm");
+        assert!(environment_detail(&[]).contains("no static"));
+        assert!(environment_detail(&["AWS_ACCESS_KEY_ID"]).contains("override profiles"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn covers_local_command_and_file_workflows() {
+        let root = env::temp_dir().join(format!("awswap-test-{}", std::process::id()));
+        let bin = root.join("bin");
+        let state = root.join("state");
+        let config = root.join("config");
+        let credentials = root.join("credentials");
+        let docker = root.join("docker");
+        fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&docker).unwrap();
+        fs::write(
+            &config,
+            "[profile dev]\nregion=us-east-1\nsso_session=company\n[profile prod]\nregion=us-west-2\n",
+        )
+        .unwrap();
+        fs::write(&credentials, "[legacy]\naws_access_key_id=test\n").unwrap();
+
+        write_executable(
+            &bin.join("aws"),
+            r#"#!/bin/sh
+case "$1 $2" in
+  "--version ") echo "aws-cli/2.test" ;;
+  "configure list-profiles") printf "dev\nprod\n" ;;
+  "sts get-caller-identity")
+    case "$*" in
+      *--query*) echo "123456789012" ;;
+      *) echo '{"UserId":"ARO:test","Account":"123456789012","Arn":"arn:aws:sts::123456789012:assumed-role/Developer/test"}' ;;
+    esac ;;
+  "ecr get-login-password") echo "secret" ;;
+  "sso login") exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+        );
+        write_executable(&bin.join("docker"), "#!/bin/sh\n/bin/cat >/dev/null\n");
+        write_executable(&bin.join("helm"), "#!/bin/sh\n/bin/cat >/dev/null\n");
+        write_executable(
+            &bin.join("docker-credential-ecr-login"),
+            "#!/bin/sh\n/bin/cat >/dev/null\n",
+        );
+
+        let variables = [
+            ("PATH", Some(bin.as_os_str())),
+            ("AWSWAP_HOME", Some(state.as_os_str())),
+            ("AWS_CONFIG_FILE", Some(config.as_os_str())),
+            ("AWS_SHARED_CREDENTIALS_FILE", Some(credentials.as_os_str())),
+            ("DOCKER_CONFIG", Some(docker.as_os_str())),
+            ("AWS_PROFILE", None),
+            ("AWSWAP_NO_ECR", None),
+            ("AWSWAP_ECR_REGISTRIES", None),
+            ("AWSWAP_SHELL_HOOK", Some(std::ffi::OsStr::new("1"))),
+        ];
+        let _environment = EnvironmentGuard::set(&variables);
+
+        assert!(command_exists("aws"));
+        assert!(!command_exists("missing"));
+        assert!(require_command("aws").is_ok());
+        assert!(require_command("missing").is_err());
+        assert_eq!(state_dir().unwrap(), state);
+        assert_eq!(state_path().unwrap(), state.join("state"));
+        assert_eq!(aws_config_path(), config);
+        assert_eq!(aws_credentials_path(), credentials);
+        assert_eq!(docker_config_path(), Some(docker.join("config.json")));
+        assert_eq!(load_state().unwrap(), State::default());
+
+        let initial = State {
+            current: Some("prod".into()),
+            previous: None,
+            recent: vec!["prod".into()],
+        };
+        save_state(&initial).unwrap();
+        assert_eq!(load_state().unwrap(), initial);
+        assert_eq!(discover_profiles().unwrap(), ["dev", "legacy", "prod"]);
+        assert_eq!(
+            read_profile_config("dev").unwrap().region.as_deref(),
+            Some("us-east-1")
+        );
+
+        let plain = Options::default();
+        let json = Options {
+            json: true,
+            ..Options::default()
+        };
+        assert!(switch(Some(&"dev".into()), &plain).is_ok());
+        assert!(run(parse_args(&["dev"]).unwrap()).is_ok());
+        assert!(switch_previous(&plain).is_ok());
+        assert!(run(parse_args(&["-"]).unwrap()).is_ok());
+        assert!(profile_for_switch(None, &["dev".into()], &State::default()).is_err());
+        assert!(current_profile(&plain).is_ok());
+        assert!(current_profile(&json).is_ok());
+        assert!(list_profiles(&plain).is_ok());
+        assert!(list_profiles(&json).is_ok());
+        assert!(status(Some(&"dev".into()), &json).is_ok());
+        assert!(doctor(Some(&"dev".into()), &json).is_ok());
+        assert!(login(Some(&"dev".into()), &json).is_ok());
+        assert!(validate_credentials("dev", &plain).is_ok());
+        assert!(refresh_credentials("dev", &plain).is_ok());
+        assert!(refresh_credentials("prod", &plain).is_err());
+        assert_eq!(
+            refresh_expired_credentials("dev", &plain, "other error".into()).unwrap_err(),
+            "other error"
+        );
+        assert!(
+            refresh_expired_credentials("dev", &plain, "run `awswap login dev`".into()).is_ok()
+        );
+
+        let profile_config = read_profile_config("dev").unwrap();
+        assert!(login_ecr("dev", &profile_config, &plain).is_ok());
+        assert_eq!(
+            docker_credential_helper("registry.example.com").unwrap(),
+            None
+        );
+        fs::write(
+            docker.join("config.json"),
+            r#"{"credHelpers":{"registry.example.com":"ecr-login"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            registry_login(
+                RegistryClient::Docker,
+                "dev",
+                "registry.example.com",
+                b"secret"
+            )
+            .unwrap(),
+            RegistryLoginMethod::EcrCredentialHelper
+        );
+        assert_eq!(
+            registry_login(
+                RegistryClient::Helm,
+                "dev",
+                "registry.example.com",
+                b"secret"
+            )
+            .unwrap(),
+            RegistryLoginMethod::Password
+        );
+
+        let configured = Options {
+            registries: vec!["123".into(), "https://registry.example.com/repo".into()],
+            ..Options::default()
+        };
+        assert_eq!(
+            ecr_registries("dev", &profile_config, &configured).unwrap(),
+            [
+                "123.dkr.ecr.us-east-1.amazonaws.com",
+                "registry.example.com"
+            ]
+        );
+        print_profiles_table(
+            &["dev".into(), "prod".into()],
+            &load_state().unwrap(),
+            Some("dev"),
+        )
+        .unwrap();
+
+        let output = Command::new("/bin/sh")
+            .args(["-c", "printf 'ExpiredToken' >&2; exit 1"])
+            .output()
+            .unwrap();
+        assert!(command_error("failed", &output).contains("ExpiredToken"));
+        assert!(aws_command_error("failed", "dev", &output, true).contains("AWS CLI"));
+        let empty_output = Command::new("/bin/sh")
+            .args(["-c", "exit 1"])
+            .output()
+            .unwrap();
+        assert!(command_error("failed", &empty_output).contains("exit status"));
+        assert!(aws_command_error("failed", "dev", &empty_output, false).contains("exit status"));
+
+        let unreadable_state = root.join("unreadable-state");
+        fs::create_dir_all(unreadable_state.join("state")).unwrap();
+        assert!(read_state(&unreadable_state.join("state")).is_err());
+
+        for args in [
+            &["current"][..],
+            &["list", "--json"][..],
+            &["status", "dev", "--json"][..],
+            &["doctor", "dev", "--json"][..],
+            &["login", "dev", "--json"][..],
+            &["init", "zsh"][..],
+            &["completions", "fish"][..],
+            &["version"][..],
+        ] {
+            assert!(run(parse_args(args).unwrap()).is_ok());
+        }
+
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    #[cfg(unix)]
+    struct EnvironmentGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    #[cfg(unix)]
+    impl EnvironmentGuard {
+        fn set(values: &[(&'static str, Option<&std::ffi::OsStr>)]) -> Self {
+            let previous = values
+                .iter()
+                .map(|(name, _)| (*name, env::var_os(name)))
+                .collect();
+            for (name, value) in values {
+                // SAFETY: this test is the only test that changes these process variables.
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+            Self(previous)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for EnvironmentGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.0 {
+                // SAFETY: this restores the variables changed by EnvironmentGuard::set.
+                unsafe {
+                    match value {
+                        Some(value) => env::set_var(name, value),
+                        None => env::remove_var(name),
+                    }
+                }
+            }
+        }
     }
 }
