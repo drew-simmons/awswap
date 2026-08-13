@@ -3,6 +3,13 @@
 All notable changes to this project are documented in this file. Release Please
 generates entries and versions from Conventional Commits.
 
+## [0.4.1](https://github.com/drew-simmons/awswap/compare/v0.4.0...v0.4.1) (2026-08-13)
+
+
+### Bug Fixes
+
+* cargo release ([648fb3d](https://github.com/drew-simmons/awswap/commit/648fb3d7da7acb55fe74560f8fe69b8808c72816))
+
 ## [0.4.0](https://github.com/drew-simmons/awswap/compare/v0.3.0...v0.4.0) (2026-08-13)
 
 
