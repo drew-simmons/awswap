@@ -2,7 +2,7 @@
 
 Release Please manages versions, `Cargo.lock`, `CHANGELOG.md`, tags, and GitHub
 release notes from Conventional Commits. Cargo-dist 0.32.0 builds the macOS and
-Linux archives, checksums, and shell installer for each generated tag.
+Linux archives, checksums, and shell installer for each release tag.
 
 ## One-time GitHub setup
 
@@ -17,9 +17,10 @@ Linux archives, checksums, and shell installer for each generated tag.
 4. Create a crates.io API token and add it as the repository Actions secret
    `CARGO_REGISTRY_TOKEN`.
 
-A dedicated token is intentional: GitHub suppresses workflow events created by
-the default `GITHUB_TOKEN`. The token lets CI run on Release PRs and lets a
-release-please tag trigger the cargo-dist workflow.
+> [!IMPORTANT]
+> Use a dedicated token for Release Please. GitHub does not start new workflow
+> runs for events created with the default `GITHUB_TOKEN`. The dedicated token
+> lets CI run on Release PRs and lets a Release Please tag start cargo-dist.
 
 ## Conventional Commits
 
@@ -48,14 +49,16 @@ keeps implementation-only commit types out of the public changelog.
 The repository is bootstrapped at version `0.0.0`. Use `feat: initial release`
 for the initial repository commit so the first Release PR proposes `v0.1.0`.
 
-Do not manually bump the package version, edit generated changelog entries, or
-create release tags. If a cargo-dist run fails, fix the cause and rerun the
-failed workflow from GitHub Actions; the existing draft remains unpublished.
+> [!IMPORTANT]
+> Do not bump the package version, edit generated changelog entries, or create
+> release tags by hand. If cargo-dist fails, fix the cause and rerun the failed
+> workflow in GitHub Actions. The draft release stays unpublished.
 
-The generated `.github/workflows/release.yml` contains a deliberate integration
-that uploads to release-please's existing draft and publishes the crate to
-crates.io. If `dist generate` rewrites the workflow, preserve or restore its
-`Publish GitHub Release` and `Publish crate to crates.io` steps.
+> [!WARNING]
+> `.github/workflows/release.yml` has custom steps that upload to the draft from
+> Release Please and publish the crate to crates.io. If `dist generate` rewrites
+> the workflow, restore the `Publish GitHub Release` and
+> `Publish crate to crates.io` steps before you merge the change.
 
 Do not move or recreate a published tag. Fix released defects with a new patch
 release.
