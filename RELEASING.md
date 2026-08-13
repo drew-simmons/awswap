@@ -11,9 +11,10 @@ Linux archives, checksums, and shell installer for each release tag.
    - Contents: read and write
    - Issues: read and write
    - Pull requests: read and write
-2. Add it as the repository Actions secret `RELEASE_PLEASE_TOKEN`.
-3. In **Settings → Actions → General**, allow GitHub Actions to create pull
-   requests if repository or organization policy otherwise blocks them.
+2. Add it as the repository Actions secret `RELEASE_PLEASE_TOKEN` for the full
+   release flow. Until then, Release Please falls back to `GITHUB_TOKEN`.
+3. In **Settings → Actions → General**, enable **Allow GitHub Actions to create
+   and approve pull requests**. The `GITHUB_TOKEN` fallback requires it.
 4. Create a crates.io API token and add it as the repository Actions secret
    `CARGO_REGISTRY_TOKEN`.
 
@@ -21,6 +22,8 @@ Linux archives, checksums, and shell installer for each release tag.
 > Use a dedicated token for Release Please. GitHub does not start new workflow
 > runs for events created with the default `GITHUB_TOKEN`. The dedicated token
 > lets CI run on Release PRs and lets a Release Please tag start cargo-dist.
+> The fallback can create or update the Release PR, but it cannot start those
+> later workflows.
 
 ## Conventional Commits
 
