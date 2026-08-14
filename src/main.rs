@@ -1139,6 +1139,36 @@ fn password_registry_login(
     registry: &str,
     password: &[u8],
 ) -> Result<RegistryLoginMethod> {
+    let output = run_password_registry_login(client, registry, password)?;
+    if !should_retry_helm_login(client, &output) {
+        return finish_registry_login(output, client.command(), registry);
+    }
+
+    retry_helm_login(registry, password, &output)
+}
+
+fn retry_helm_login(
+    registry: &str,
+    password: &[u8],
+    first_output: &Output,
+) -> Result<RegistryLoginMethod> {
+    let first_error = command_error(&format!("helm login to {registry} failed"), first_output);
+    clear_helm_registry_credential(registry).map_err(|logout_error| {
+        format!("{first_error}; automatic Keychain cleanup failed: {logout_error}")
+    })?;
+    let retry = run_password_registry_login(RegistryClient::Helm, registry, password)?;
+    finish_registry_login(retry, RegistryClient::Helm.command(), registry)
+}
+
+fn should_retry_helm_login(client: RegistryClient, output: &Output) -> bool {
+    client == RegistryClient::Helm && !output.status.success() && is_duplicate_keychain_item(output)
+}
+
+fn run_password_registry_login(
+    client: RegistryClient,
+    registry: &str,
+    password: &[u8],
+) -> Result<Output> {
     let command = client.command();
     let mut child = Command::new(command)
         .args(client.login_args(registry))
@@ -1148,7 +1178,9 @@ fn password_registry_login(
         .spawn()
         .map_err(|error| format!("could not start {command}: {error}"))?;
     send_registry_password(&mut child, command, password)?;
-    finish_registry_login(child, command, registry)
+    child
+        .wait_with_output()
+        .map_err(|error| format!("could not wait for {command}: {error}"))
 }
 
 fn send_registry_password(
@@ -1165,18 +1197,36 @@ fn send_registry_password(
 }
 
 fn finish_registry_login(
-    child: std::process::Child,
+    output: Output,
     command: &str,
     registry: &str,
 ) -> Result<RegistryLoginMethod> {
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("could not wait for {command}: {error}"))?;
     if output.status.success() {
         Ok(RegistryLoginMethod::Password)
     } else {
         Err(command_error(
             &format!("{command} login to {registry} failed"),
+            &output,
+        ))
+    }
+}
+
+fn is_duplicate_keychain_item(output: &Output) -> bool {
+    let detail = output_detail(output).to_ascii_lowercase();
+    detail.contains("-25299")
+        || detail.contains("the specified item already exists in the keychain")
+}
+
+fn clear_helm_registry_credential(registry: &str) -> Result<()> {
+    let output = Command::new("helm")
+        .args(["registry", "logout", registry])
+        .output()
+        .map_err(|error| format!("could not start helm: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_error(
+            &format!("helm logout from {registry} failed"),
             &output,
         ))
     }
@@ -2840,7 +2890,28 @@ esac
 "#,
         );
         write_executable(&bin.join("docker"), "#!/bin/sh\n/bin/cat >/dev/null\n");
-        write_executable(&bin.join("helm"), "#!/bin/sh\n/bin/cat >/dev/null\n");
+        write_executable(
+            &bin.join("helm"),
+            r#"#!/bin/sh
+case "$*" in
+  "registry login duplicate.example.com "*)
+    /bin/cat >/dev/null
+    if [ ! -f "$AWSWAP_HOME/helm-logout" ]; then
+      echo "Error: The specified item already exists in the keychain. (-25299)" >&2
+      exit 1
+    fi ;;
+  "registry logout duplicate.example.com")
+    /usr/bin/touch "$AWSWAP_HOME/helm-logout" ;;
+  "registry login denied.example.com "*)
+    /bin/cat >/dev/null
+    echo "access denied" >&2
+    exit 1 ;;
+  "registry logout denied.example.com")
+    /usr/bin/touch "$AWSWAP_HOME/unexpected-helm-logout" ;;
+  *) /bin/cat >/dev/null ;;
+esac
+"#,
+        );
         write_executable(
             &bin.join("docker-credential-ecr-login"),
             "#!/bin/sh\n/bin/cat >/dev/null\n",
@@ -2942,6 +3013,23 @@ esac
             .unwrap(),
             RegistryLoginMethod::Password
         );
+        assert_eq!(
+            registry_login(
+                RegistryClient::Helm,
+                "dev",
+                "duplicate.example.com",
+                b"secret"
+            )
+            .unwrap(),
+            RegistryLoginMethod::Password
+        );
+        assert!(state.join("helm-logout").is_file());
+        assert!(
+            registry_login(RegistryClient::Helm, "dev", "denied.example.com", b"secret")
+                .unwrap_err()
+                .contains("access denied")
+        );
+        assert!(!state.join("unexpected-helm-logout").exists());
 
         let configured = Options {
             registries: vec!["123".into(), "https://registry.example.com/repo".into()],

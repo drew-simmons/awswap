@@ -158,6 +158,9 @@ It then:
    receives one unless its effective credential helper is `ecr-login`, in which
    case `awswap` validates that helper under the selected profile instead.
 
+If Helm's macOS Keychain helper reports duplicate item error `-25299`, `awswap`
+logs out from that registry and retries the Helm login once.
+
 The ECR credential helper gets short-lived Docker credentials as needed. It
 does not support Docker's credential `store` operation, so `awswap` skips
 `docker login` when that helper is set. The shell hook keeps `AWS_PROFILE`
