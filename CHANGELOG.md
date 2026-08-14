@@ -3,6 +3,13 @@
 All notable changes to this project are documented in this file. Release Please
 generates entries and versions from Conventional Commits.
 
+## [0.4.2](https://github.com/drew-simmons/awswap/compare/v0.4.1...v0.4.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* retry Helm login after duplicate Keychain item errors ([#17](https://github.com/drew-simmons/awswap/issues/17)) ([5bb9825](https://github.com/drew-simmons/awswap/commit/5bb9825d9a968d4a7f0cffa9bafeb3a4426f19f3))
+
 ## [0.4.1](https://github.com/drew-simmons/awswap/compare/v0.4.0...v0.4.1) (2026-08-13)
 
 
