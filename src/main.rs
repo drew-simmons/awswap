@@ -1140,21 +1140,28 @@ fn password_registry_login(
     password: &[u8],
 ) -> Result<RegistryLoginMethod> {
     let output = run_password_registry_login(client, registry, password)?;
-    if output.status.success()
-        || client != RegistryClient::Helm
-        || !is_duplicate_keychain_item(&output)
-    {
+    if !should_retry_helm_login(client, &output) {
         return finish_registry_login(output, client.command(), registry);
     }
 
+    retry_helm_login(registry, password, &output)
+}
+
+fn retry_helm_login(
+    registry: &str,
+    password: &[u8],
+    first_output: &Output,
+) -> Result<RegistryLoginMethod> {
+    let first_error = command_error(&format!("helm login to {registry} failed"), first_output);
     clear_helm_registry_credential(registry).map_err(|logout_error| {
-        format!(
-            "{}; automatic Keychain cleanup failed: {logout_error}",
-            command_error(&format!("helm login to {registry} failed"), &output)
-        )
+        format!("{first_error}; automatic Keychain cleanup failed: {logout_error}")
     })?;
-    let retry = run_password_registry_login(client, registry, password)?;
-    finish_registry_login(retry, client.command(), registry)
+    let retry = run_password_registry_login(RegistryClient::Helm, registry, password)?;
+    finish_registry_login(retry, RegistryClient::Helm.command(), registry)
+}
+
+fn should_retry_helm_login(client: RegistryClient, output: &Output) -> bool {
+    client == RegistryClient::Helm && !output.status.success() && is_duplicate_keychain_item(output)
 }
 
 fn run_password_registry_login(
