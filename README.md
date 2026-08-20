@@ -154,17 +154,33 @@ It then:
 1. Checks the profile with `aws sts get-caller-identity`.
 2. If credentials are invalid, runs `aws sso login` for SSO profiles or
    `aws login` for profiles with `login_session`, opening the AWS sign-in flow.
-3. Authenticates registry clients: Helm receives an ECR login token; Docker
-   receives one unless its effective credential helper is `ecr-login`, in which
-   case `awswap` validates that helper under the selected profile instead.
+3. Authenticates registry clients: each one receives an ECR login token unless
+   its effective credential helper is `ecr-login`, in which case `awswap`
+   validates that helper under the selected profile instead.
+
+`awswap` reads Docker's helper from `$DOCKER_CONFIG/config.json` (default
+`~/.docker/config.json`) and Helm's from `$HELM_REGISTRY_CONFIG` (default the
+path `helm env` reports). Both files use the same `credHelpers` and
+`credsStore` keys, so the two clients can differ.
+
+The ECR credential helper gets short-lived registry credentials as needed. It
+does not support the credential `store` operation, so `awswap` skips the login
+for any client that maps the registry to `ecr-login`. The shell hook keeps
+`AWS_PROFILE` available to the helper for later pulls.
 
 If Helm's macOS Keychain helper reports duplicate item error `-25299`, `awswap`
-logs out from that registry and retries the Helm login once.
+logs out from that registry and retries the Helm login once. Mapping ECR
+registries to `ecr-login` in Helm's registry config avoids the Keychain
+altogether:
 
-The ECR credential helper gets short-lived Docker credentials as needed. It
-does not support Docker's credential `store` operation, so `awswap` skips
-`docker login` when that helper is set. The shell hook keeps `AWS_PROFILE`
-available to the helper for later pulls.
+```json
+{
+  "auths": {},
+  "credHelpers": {
+    "123456789012.dkr.ecr.us-east-1.amazonaws.com": "ecr-login"
+  }
+}
+```
 
 The shell hook exports `AWS_PROFILE` and `AWS_DEFAULT_PROFILE`. It also removes
 stale static AWS credential variables that would override the profile.
