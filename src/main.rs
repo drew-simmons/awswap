@@ -2910,7 +2910,9 @@ mod tests {
         let credentials = root.join("credentials");
         let docker = root.join("docker");
         let helm_config = root.join("helm-registry.json");
+        let empty_bin = root.join("empty-bin");
         fs::create_dir_all(&bin).unwrap();
+        fs::create_dir_all(&empty_bin).unwrap();
         fs::create_dir_all(&docker).unwrap();
         fs::write(
             &config,
@@ -2955,6 +2957,9 @@ case "$*" in
     exit 1 ;;
   "registry logout denied.example.com")
     /usr/bin/touch "$AWSWAP_HOME/unexpected-helm-logout" ;;
+  "env")
+    echo "HELM_BIN=\"helm\""
+    echo "HELM_REGISTRY_CONFIG=\"$AWSWAP_HOME/helm-env-registry.json\"" ;;
   *) /bin/cat >/dev/null ;;
 esac
 "#,
@@ -2988,6 +2993,15 @@ esac
         assert_eq!(aws_credentials_path(), credentials);
         assert_eq!(docker_config_path(), Some(docker.join("config.json")));
         assert_eq!(helm_registry_config_path(), Some(helm_config.clone()));
+        {
+            let _unset = EnvironmentGuard::set(&[("HELM_REGISTRY_CONFIG", None)]);
+            assert_eq!(
+                helm_registry_config_path(),
+                Some(state.join("helm-env-registry.json"))
+            );
+            let _no_helm = EnvironmentGuard::set(&[("PATH", Some(empty_bin.as_os_str()))]);
+            assert_eq!(helm_registry_config_path(), None);
+        }
         assert_eq!(load_state().unwrap(), State::default());
 
         let initial = State {
