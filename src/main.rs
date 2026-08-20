@@ -68,6 +68,13 @@ impl RegistryClient {
             ],
         }
     }
+
+    fn config_path(self) -> Option<PathBuf> {
+        match self {
+            Self::Docker => docker_config_path(),
+            Self::Helm => helm_registry_config_path(),
+        }
+    }
 }
 
 #[derive(Debug, Default, Eq, PartialEq)]
@@ -1130,8 +1137,7 @@ fn registry_login(
 }
 
 fn uses_ecr_credential_helper(client: RegistryClient, registry: &str) -> Result<bool> {
-    Ok(client == RegistryClient::Docker
-        && docker_credential_helper(registry)?.as_deref() == Some("ecr-login"))
+    Ok(credential_helper(client, registry)?.as_deref() == Some("ecr-login"))
 }
 
 fn password_registry_login(
@@ -1232,8 +1238,8 @@ fn clear_helm_registry_credential(registry: &str) -> Result<()> {
     }
 }
 
-fn docker_credential_helper(registry: &str) -> Result<Option<String>> {
-    let Some(path) = docker_config_path() else {
+fn credential_helper(client: RegistryClient, registry: &str) -> Result<Option<String>> {
+    let Some(path) = client.config_path() else {
         return Ok(None);
     };
     let contents = match fs::read_to_string(&path) {
@@ -1241,11 +1247,11 @@ fn docker_credential_helper(registry: &str) -> Result<Option<String>> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("could not read {}: {error}", path.display())),
     };
-    parse_docker_credential_helper(&contents, registry)
+    parse_credential_helper(&contents, registry)
         .map_err(|error| format!("could not parse {}: {error}", path.display()))
 }
 
-fn parse_docker_credential_helper(
+fn parse_credential_helper(
     contents: &str,
     registry: &str,
 ) -> std::result::Result<Option<String>, serde_json::Error> {
@@ -1772,6 +1778,31 @@ fn docker_config_path() -> Option<PathBuf> {
         .map(|directory| directory.join("config.json"))
 }
 
+fn helm_registry_config_path() -> Option<PathBuf> {
+    env::var_os("HELM_REGISTRY_CONFIG")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(helm_registry_config_from_helm)
+}
+
+fn helm_registry_config_from_helm() -> Option<PathBuf> {
+    let output = Command::new("helm").arg("env").output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| parse_helm_registry_config(&String::from_utf8_lossy(&output.stdout)))
+        .flatten()
+}
+
+fn parse_helm_registry_config(contents: &str) -> Option<PathBuf> {
+    contents
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("HELM_REGISTRY_CONFIG="))
+        .map(|value| value.trim().trim_matches('"'))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 fn aws_config_path() -> PathBuf {
     env::var_os("AWS_CONFIG_FILE")
         .map(PathBuf::from)
@@ -2135,7 +2166,7 @@ fn docker_helper_check(
     let registry = ecr_registry(&identity.account, region);
     Some(docker_helper_result(
         &registry,
-        docker_credential_helper(&registry),
+        credential_helper(RegistryClient::Docker, &registry),
     ))
 }
 
@@ -2528,18 +2559,33 @@ mod tests {
             }
         }"#;
         assert_eq!(
-            parse_docker_credential_helper(config, "123.dkr.ecr.us-east-1.amazonaws.com").unwrap(),
+            parse_credential_helper(config, "123.dkr.ecr.us-east-1.amazonaws.com").unwrap(),
             Some("ecr-login".into())
         );
         assert_eq!(
-            parse_docker_credential_helper(config, "registry.example.com").unwrap(),
+            parse_credential_helper(config, "registry.example.com").unwrap(),
             Some("osxkeychain".into())
         );
     }
 
     #[test]
     fn rejects_invalid_docker_config() {
-        assert!(parse_docker_credential_helper("not json", "registry.example.com").is_err());
+        assert!(parse_credential_helper("not json", "registry.example.com").is_err());
+    }
+
+    #[test]
+    fn reads_registry_config_path_from_helm_env() {
+        assert_eq!(
+            parse_helm_registry_config(
+                "HELM_BIN=\"helm\"\nHELM_REGISTRY_CONFIG=\"/home/user/registry/config.json\"\n"
+            ),
+            Some(PathBuf::from("/home/user/registry/config.json"))
+        );
+        assert_eq!(parse_helm_registry_config("HELM_BIN=\"helm\"\n"), None);
+        assert_eq!(
+            parse_helm_registry_config("HELM_REGISTRY_CONFIG=\"\"\n"),
+            None
+        );
     }
 
     #[test]
@@ -2863,6 +2909,7 @@ mod tests {
         let config = root.join("config");
         let credentials = root.join("credentials");
         let docker = root.join("docker");
+        let helm_config = root.join("helm-registry.json");
         fs::create_dir_all(&bin).unwrap();
         fs::create_dir_all(&docker).unwrap();
         fs::write(
@@ -2923,6 +2970,7 @@ esac
             ("AWS_CONFIG_FILE", Some(config.as_os_str())),
             ("AWS_SHARED_CREDENTIALS_FILE", Some(credentials.as_os_str())),
             ("DOCKER_CONFIG", Some(docker.as_os_str())),
+            ("HELM_REGISTRY_CONFIG", Some(helm_config.as_os_str())),
             ("AWS_PROFILE", None),
             ("AWSWAP_NO_ECR", None),
             ("AWSWAP_ECR_REGISTRIES", None),
@@ -2939,6 +2987,7 @@ esac
         assert_eq!(aws_config_path(), config);
         assert_eq!(aws_credentials_path(), credentials);
         assert_eq!(docker_config_path(), Some(docker.join("config.json")));
+        assert_eq!(helm_registry_config_path(), Some(helm_config.clone()));
         assert_eq!(load_state().unwrap(), State::default());
 
         let initial = State {
@@ -2985,7 +3034,7 @@ esac
         let profile_config = read_profile_config("dev").unwrap();
         assert!(login_ecr("dev", &profile_config, &plain).is_ok());
         assert_eq!(
-            docker_credential_helper("registry.example.com").unwrap(),
+            credential_helper(RegistryClient::Docker, "registry.example.com").unwrap(),
             None
         );
         fs::write(
@@ -3030,6 +3079,25 @@ esac
                 .contains("access denied")
         );
         assert!(!state.join("unexpected-helm-logout").exists());
+        assert_eq!(
+            credential_helper(RegistryClient::Helm, "registry.example.com").unwrap(),
+            None
+        );
+        fs::write(
+            &helm_config,
+            r#"{"credHelpers":{"registry.example.com":"ecr-login"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            registry_login(
+                RegistryClient::Helm,
+                "dev",
+                "registry.example.com",
+                b"secret"
+            )
+            .unwrap(),
+            RegistryLoginMethod::EcrCredentialHelper
+        );
 
         let configured = Options {
             registries: vec!["123".into(), "https://registry.example.com/repo".into()],
