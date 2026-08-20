@@ -3,6 +3,13 @@
 All notable changes to this project are documented in this file. Release Please
 generates entries and versions from Conventional Commits.
 
+## [0.4.3](https://github.com/drew-simmons/awswap/compare/v0.4.2...v0.4.3) (2026-08-20)
+
+
+### Bug Fixes
+
+* helm login keystore ([#19](https://github.com/drew-simmons/awswap/issues/19)) ([aa1bac2](https://github.com/drew-simmons/awswap/commit/aa1bac24b122e30cbc3588afc850f443f3644c7f))
+
 ## [0.4.2](https://github.com/drew-simmons/awswap/compare/v0.4.1...v0.4.2) (2026-08-14)
 
 
